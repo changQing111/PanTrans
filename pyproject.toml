@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pantrans"                  
+version = "0.1.0"
+description = "A Scalable Approach for Constructing Pan-Genome and Pan-Transcriptome in Polyploid Organisms"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+  {name = "QingChang", email = "you@example.com"},
+]
+
+dependencies = [
+  "pysam",
+  "networkx"
+]
+
+[project.scripts]
+ploypan = "ploypan.main:main"
