@@ -1,0 +1,27 @@
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Local run scripts not intended for the repository
+run_pantrans.sh
+test/run_pantrans_append.sh
+
+# Scheduler logs
+slurm-*.err
+slurm-*.out
+test/slurm-*.err
+test/slurm-*.out
+
+# Large test inputs
+test/*.fasta
+test/*.fa
+test/*.fai
+test/*.bam
+test/*.sam
+test/*.bed
+
+# Generated outputs
+test/pantrans_construct_out/
+test/pantrans_append_out/
