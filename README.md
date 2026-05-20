@@ -19,6 +19,8 @@ The current implementation builds gene-level relationship graphs from cDNA-to-gD
 Install in editable mode from the project root:
 
 ```bash
+git clone https://github.com/changQing111/PanTrans.git
+cd PanTrans
 pip install -e .
 ```
 
