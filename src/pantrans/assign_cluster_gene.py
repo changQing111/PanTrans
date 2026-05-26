@@ -1,4 +1,3 @@
-fill_char = "NA"
 MAIN_CHROMS = tuple(
     [f"A{i}" for i in range(1, 8)] +
     [f"B{i}" for i in range(1, 8)] +
@@ -9,31 +8,6 @@ def build_main_chrom_order(main_chroms=None):
     chroms = tuple(main_chroms) if main_chroms else MAIN_CHROMS
     return {chrom: index for index, chrom in enumerate(chroms)}
 
-def traverse_pseu_mat(li_li):
-    """逐列输出矩阵，去掉填充字符"""
-    results = []
-    for i in range(len(li_li[0])):
-        out_li = [li_li[j][i] for j in range(len(li_li))]
-        new_li = [a for a in out_li if a != fill_char]
-        if new_li:  # 只有非空时才输出
-            results.append(new_li)
-    return results
-
-def fill_NA(li_li):
-    """对齐不同长度的列表，用 fill_char 填充"""
-    nrow = get_max_len(li_li)
-    new_li_li = []
-    for li in li_li:
-        new_li = li[:]  # 拷贝，避免原地修改
-        num = nrow - len(li)
-        if num > 0:
-            new_li.extend([fill_char] * num)
-        new_li_li.append(new_li)
-    return new_li_li
-
-def get_max_len(li_li):
-    return max(len(li) for li in li_li)
-
 def is_main_chrom(chrom, main_chrom_order):
     return chrom in main_chrom_order
 
@@ -41,15 +15,6 @@ def chrom_sort_key(chrom, main_chrom_order):
     if chrom in main_chrom_order:
         return (0, main_chrom_order[chrom], chrom)
     return (1, chrom.lower(), chrom)
-
-def split_gene_by_chrom(gene_li, bed_dic, chrom_s):
-    """按染色体分组基因"""
-    chrom_gene_dic = {}
-    for i in gene_li:
-        chrom = bed_dic[i][0]
-        chrom_s.add(chrom)
-        chrom_gene_dic.setdefault(chrom, []).append(i)
-    return chrom_gene_dic
 
 def merge_same_start_gene(gene_li, bed_dic):
     """同一染色体起点的多个基因，取长度最长的"""
@@ -81,32 +46,6 @@ def sort_gene(gene_li, bed_dic, main_chrom_order):
             ),
         )
         return sorted_li
-
-def assign_gene(sorted_chrom_gene_dic_li, all_chrom_s):
-    """对齐不同品种的染色体基因列表并输出成簇列表.
-
-    返回值:
-        List[List[str]]: 每个子列表是一组在不同品种上按染色体位置对齐的基因 ID。
-    """
-    results = []
-    for chrom in all_chrom_s:
-        li_li = []
-        for dic in sorted_chrom_gene_dic_li:
-            if chrom in dic:
-                li_li.append(dic[chrom])
-        if li_li:
-            fill_li_li = fill_NA(li_li)
-            results.extend(traverse_pseu_mat(fill_li_li))
-    return results
-
-def find_duplicate_gene(variety_set, variety_list, gene_list):
-    """找到同一品种的重复基因"""
-    duplicate_gene_dic = {i: [] for i in variety_set}
-    for i in variety_set:
-        for index, v in enumerate(variety_list):
-            if i == v:
-                duplicate_gene_dic[i].append(gene_list[index])
-    return duplicate_gene_dic
 
 def get_variety_n(query, var_li, refer_prefixes=None):
     """严格匹配品种名（前缀匹配），可将参考集前缀折叠为 Refer。"""

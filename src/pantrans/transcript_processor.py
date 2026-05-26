@@ -2,6 +2,7 @@ import pysam
 import Bio.SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+import re
 
 
 def _get_tag(read, key, default=0):
@@ -48,6 +49,56 @@ def _extract_exon_and_splice(read):
         exon_coord_li.append((exon_start + 1, current_pos))
 
     return splice_site_li, exon_coord_li
+
+def _parse_gtf_attributes(attrs):
+    parsed = {}
+    for item in attrs.strip().split(";"):
+        item = item.strip()
+        if not item or " " not in item:
+            continue
+        key, value = item.replace('"', "").split(" ", 1)
+        parsed[key] = value
+    return parsed
+
+def _pan_gene_sort_key(gene_id):
+    if not gene_id.startswith("Pan"):
+        return (999, 999, gene_id, 999999999)
+    core = gene_id[3:]
+    contig_match = re.match(r"^Ctg(\d+)$", core)
+    if contig_match:
+        return (999, 999, "Ctg", int(contig_match.group(1)))
+    chrom_match = re.match(r"^(\d+)([ABD])(\d+)$", core)
+    if chrom_match:
+        chrom_num = int(chrom_match.group(1))
+        subgenome = {"A": 0, "B": 1, "D": 2}[chrom_match.group(2)]
+        order_num = int(chrom_match.group(3))
+        return (chrom_num, subgenome, chrom_match.group(2), order_num)
+    return (999, 999, core, 999999999)
+
+def sort_gtf_by_gene_id(gtf_path):
+    """按 Pan gene_id 顺序重排 GTF。"""
+    records = []
+    with open(gtf_path, "rt") as handle:
+        for line in handle:
+            stripped = line.rstrip("\n")
+            if not stripped:
+                continue
+            fields = stripped.split("\t")
+            if len(fields) != 9:
+                records.append(((999, 999, "misc", 999999999), 999, 999999999, 999999999, stripped))
+                continue
+            attrs = _parse_gtf_attributes(fields[8])
+            gene_id = attrs.get("gene_id", fields[0])
+            transcript_id = attrs.get("transcript_id", "")
+            transcript_index = int(transcript_id.rsplit(".", 1)[1]) if "." in transcript_id and transcript_id.rsplit(".", 1)[1].isdigit() else 1
+            feature_order = 0 if fields[2] == "transcript" else 1
+            start_i = int(fields[3]) if fields[3].isdigit() else 0
+            end_i = int(fields[4]) if fields[4].isdigit() else 0
+            records.append((_pan_gene_sort_key(gene_id), transcript_index, feature_order, start_i, end_i, stripped))
+    records.sort(key=lambda item: item[:-1])
+    with open(gtf_path, "w") as handle:
+        for record in records:
+            handle.write(record[-1] + "\n")
 
 
 def extract_exon_coord_splice_site(bam_path, cluster_dic):

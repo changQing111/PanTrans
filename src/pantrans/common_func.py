@@ -1,5 +1,4 @@
 import os
-import sys
 import pysam
 import subprocess
 import logging
@@ -140,55 +139,6 @@ def extract_fasta_subset_by_names(
                     out.write(seq[i:i+line_width] + "\n")
     fa.close()
 
-def get_longest_pep(fasta_file, output_file=None):
-    """
-    从FASTA文件中提取每个基因的最长转录本
-    
-    参数:
-        fasta_file (str): 输入FASTA文件路径
-        output_file (str): 可选，输出FASTA文件路径
-    
-    返回:
-        dict: key 为基因 ID, value 为 (转录本ID, 序列)
-    """
-    longest = {}
-    with open(fasta_file) as f:
-        transcript_id = None
-        seq_parts = []
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                # 保存上一个转录本
-                if transcript_id:
-                    seq = "".join(seq_parts)
-                    gene_id = transcript_id.split('.')[0]
-                    if gene_id not in longest or len(seq) > len(longest[gene_id][1]):
-                        longest[gene_id] = (transcript_id, seq)
-                # 新转录本开始
-                transcript_id = line[1:].split()[0]  # 取ID
-                seq_parts = []
-            else:
-                seq_parts.append(line)
-        # 最后一条
-        if transcript_id:
-            seq = "".join(seq_parts)
-            gene_id = transcript_id.split('.')[0]
-            if gene_id not in longest or len(seq) > len(longest[gene_id][1]):
-                longest[gene_id] = (transcript_id, seq)
-
-    # 如果指定了输出文件路径，则写入结果
-    if output_file:
-        with open(output_file, "w") as out:
-            for gene_id, (tid, seq) in longest.items():
-                out.write(f">{tid}\n")
-                # 按 60 字符换行，符合FASTA规范
-                for i in range(0, len(seq), 60):
-                    out.write(seq[i:i+60] + "\n")
-
-    return longest
-
 def concat_fasta_files(input_paths, output_path):
     """按顺序合并多个 FASTA 文件。"""
     with open(output_path, "w") as out_handle:
@@ -206,3 +156,126 @@ def concat_text_files(input_paths, output_path):
                 for line in in_handle:
                     out_handle.write(line)
     return output_path
+
+def extract_transcripts_by_gene_names(fasta_file, gene_names, output_file, line_width=60):
+    """从 transcript FASTA 中提取指定 gene 的所有 transcript。"""
+    gene_name_set = set(gene_names)
+    kept = 0
+    with open(fasta_file, "rt") as in_handle, open(output_file, "w") as out_handle:
+        keep_record = False
+        header = None
+        seq_parts = []
+        for raw_line in in_handle:
+            line = raw_line.rstrip("\n")
+            if line.startswith(">"):
+                if header is not None and keep_record:
+                    out_handle.write(header + "\n")
+                    seq = "".join(seq_parts)
+                    for i in range(0, len(seq), line_width):
+                        out_handle.write(seq[i:i + line_width] + "\n")
+                    kept += 1
+                transcript_id = line[1:].split()[0]
+                gene_id = ".".join(transcript_id.split(".")[:-1]) if "." in transcript_id else transcript_id
+                keep_record = gene_id in gene_name_set
+                header = line
+                seq_parts = []
+            else:
+                if header is not None:
+                    seq_parts.append(line.strip())
+        if header is not None and keep_record:
+            out_handle.write(header + "\n")
+            seq = "".join(seq_parts)
+            for i in range(0, len(seq), line_width):
+                out_handle.write(seq[i:i + line_width] + "\n")
+            kept += 1
+    return kept
+
+def extract_fasta_records_by_exact_names(fasta_file, record_names, output_file, line_width=60):
+    """从 FASTA 中按精确 header token 提取记录，不依赖 faidx。"""
+    record_name_set = set(record_names)
+    kept = 0
+    with open(fasta_file, "rt") as in_handle, open(output_file, "w") as out_handle:
+        keep_record = False
+        header = None
+        seq_parts = []
+        for raw_line in in_handle:
+            line = raw_line.rstrip("\n")
+            if line.startswith(">"):
+                if header is not None and keep_record:
+                    out_handle.write(header + "\n")
+                    seq = "".join(seq_parts)
+                    for i in range(0, len(seq), line_width):
+                        out_handle.write(seq[i:i + line_width] + "\n")
+                    kept += 1
+                record_id = line[1:].split()[0]
+                keep_record = record_id in record_name_set
+                header = line
+                seq_parts = []
+            else:
+                if header is not None:
+                    seq_parts.append(line.strip())
+        if header is not None and keep_record:
+            out_handle.write(header + "\n")
+            seq = "".join(seq_parts)
+            for i in range(0, len(seq), line_width):
+                out_handle.write(seq[i:i + line_width] + "\n")
+            kept += 1
+    return kept
+
+def build_transcript_index(fasta_file):
+    """从 transcript FASTA 建立 gene_id -> [(transcript_id, header, seq)] 索引。"""
+    transcript_index = {}
+    with open(fasta_file, "rt") as in_handle:
+        header = None
+        transcript_id = None
+        seq_parts = []
+        for raw_line in in_handle:
+            line = raw_line.rstrip("\n")
+            if line.startswith(">"):
+                if header is not None and transcript_id is not None:
+                    gene_id = ".".join(transcript_id.split(".")[:-1]) if "." in transcript_id else transcript_id
+                    transcript_index.setdefault(gene_id, []).append((transcript_id, header, "".join(seq_parts)))
+                header = line
+                transcript_id = line[1:].split()[0]
+                seq_parts = []
+            else:
+                if header is not None:
+                    seq_parts.append(line.strip())
+        if header is not None and transcript_id is not None:
+            gene_id = ".".join(transcript_id.split(".")[:-1]) if "." in transcript_id else transcript_id
+            transcript_index.setdefault(gene_id, []).append((transcript_id, header, "".join(seq_parts)))
+    return transcript_index
+
+def write_transcripts_from_index(transcript_index, gene_names, output_file, line_width=60):
+    """根据 gene_id -> transcript 索引写出指定 gene 的所有 transcript。"""
+    kept = 0
+    with open(output_file, "w") as out_handle:
+        for gene_id in gene_names:
+            for transcript_id, header, seq in transcript_index.get(gene_id, []):
+                out_handle.write(header + "\n")
+                for i in range(0, len(seq), line_width):
+                    out_handle.write(seq[i:i + line_width] + "\n")
+                kept += 1
+    return kept
+
+def extract_fasta_records_by_exact_names_indexed(fasta_file, record_names, output_file, line_width=60):
+    """用 faidx 按精确记录名提取 FASTA，避免全文件扫描。"""
+    record_name_set = set(record_names)
+    fai_file = fasta_file + ".fai"
+    if not os.path.exists(fai_file):
+        logger.info(f"未找到索引文件 {fai_file}，正在创建...")
+        subprocess.run(["samtools", "faidx", fasta_file], check=True)
+        logger.info("索引文件已生成。")
+    fa = pysam.FastaFile(fasta_file)
+    kept = 0
+    with open(output_file, "w") as out_handle:
+        for record_id in fa.references:
+            if record_id not in record_name_set:
+                continue
+            seq = fa.fetch(record_id)
+            out_handle.write(f">{record_id}\n")
+            for i in range(0, len(seq), line_width):
+                out_handle.write(seq[i:i + line_width] + "\n")
+            kept += 1
+    fa.close()
+    return kept

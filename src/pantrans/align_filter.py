@@ -1,5 +1,3 @@
-import re
-import os
 import subprocess
 import pysam
 
@@ -8,107 +6,19 @@ COV_MIN = 0.80      # 覆盖度阈值
 PID_MIN = 0.90      # 近似一致性阈值
 SOFT_MAX = 0.10     # 软截断比例上限
 
-def diamond_makedb(pep_path, threads, db_n):
-    cmd = f"diamond makedb --threads {threads} --in {pep_path} --db {db_n}"
-    subprocess.run(cmd, shell=True, check=True)
-
-def diamond_blastp(db_n, query_path, threads, blastp_res_path):
-    # use diamond blastp self all.vs. self all
-    cmd = f"diamond blastp --threads {threads} --db {db_n} --query {query_path} --max-target-seqs 100 --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen > {blastp_res_path}"
-    subprocess.run(cmd, shell=True, check=True)
-    
-def parse_blast_line(line):
-    """
-    解析 DIAMOND/BLAST outfmt 6 格式的一行结果
-    """
-    fields = line.strip().split("\t")
-    if len(fields) < 14:
-        raise ValueError(f"BLAST outfmt 6 格式至少需要14个字段，但当前行只有 {len(fields)} 个字段: {line[:100]}")
-    return {
-        "qseqid": fields[0],
-        "sseqid": fields[1],
-        "pident": float(fields[2]),
-        "length": int(fields[3]),
-        "qstart": int(fields[6]),
-        "qend": int(fields[7]),
-        "evalue": float(fields[10]),
-        "bitscore": float(fields[11]),
-        "qlen": int(fields[12]),
-        "slen": int(fields[13])
-    }
-
-def filter_blastp(infile, outfile,
-                evalue_thresh=1e-20,
-                identity_thresh=70.0,
-                qcov_thresh=0.7,
-                scov_thresh=0.7,
-                best_hit_only=True):
-    """
-    过滤 BLAST/DIAMOND 结果
-    参数:
-      evalue_thresh   - E-value 阈值
-      identity_thresh - 百分比身份率阈值
-      qcov_thresh     - query 覆盖度阈值 (alignment length / qlen)
-      scov_thresh     - subject 覆盖度阈值 (alignment length / slen)
-      best_hit_only   - 是否只保留每个 query 的最佳 hit
-    """
-    hits_by_query = {}
-
-    with open(infile) as fin:
-        for line in fin:
-            if line.startswith("#") or not line.strip():
-                continue
-            try:
-                hit = parse_blast_line(line)
-            except (ValueError, IndexError) as e:
-                # 跳过格式错误的行，记录警告
-                import warnings
-                warnings.warn(f"跳过格式错误的行: {e}")
-                continue
-
-            # 覆盖度计算
-            qcov = hit["length"] / hit["qlen"] if hit["qlen"] > 0 else 0
-            scov = hit["length"] / hit["slen"] if hit["slen"] > 0 else 0
-
-            if (hit["evalue"] <= evalue_thresh and
-                hit["pident"] >= identity_thresh and
-                qcov >= qcov_thresh and
-                scov >= scov_thresh):
-
-                if best_hit_only:
-                    # 按 bitscore 保留最佳 hit
-                    if hit["qseqid"] not in hits_by_query or hit["bitscore"] > hits_by_query[hit["qseqid"]]["bitscore"]:
-                        hits_by_query[hit["qseqid"]] = {"line": line, "bitscore": hit["bitscore"]}
-                else:
-                    if hit["qseqid"] not in hits_by_query:
-                        hits_by_query[hit["qseqid"]] = []
-                    hits_by_query[hit["qseqid"]].append({"line": line, "bitscore": hit["bitscore"]})
-
-    # 输出结果
-    with open(outfile, "w") as fout:
-        if best_hit_only:
-            for q in hits_by_query:
-                fout.write(hits_by_query[q]["line"])
-        else:
-            for q in hits_by_query:
-                for h in hits_by_query[q]:
-                    fout.write(h["line"])
-
-
 def minimap2_map(cdna_path, gdna_path, threads, bam_path):
-    # use minimap2 to align cdna to gdna, bam sorted by coordinate
-    cmd = f"minimap2 -ax splice:hq -uf -I 16G --secondary=yes -N 100 --MD --cs=long -t {threads} {gdna_path} {cdna_path} | samtools view -@{threads} -hb - | samtools sort -@{threads} > {bam_path}"
+    # use minimap2 to align cdna to gdna and write an unsorted BAM
+    cmd = f"minimap2 -ax splice:hq -uf -I 16G --secondary=yes -N 100 -t {threads} {gdna_path} {cdna_path} | samtools view -@{threads} -hb - > {bam_path}"
     subprocess.run(cmd, shell=True, check=True)
 
-def bam_index(bam_path):
-    cmd_index = f"samtools index {bam_path}"
-    try:
-        subprocess.run(cmd_index, shell=True, check=True)
-        return
-    except (KeyError, ValueError):
-        cmd_index = f"samtools index -c {bam_path}"
-        subprocess.run(cmd_index, shell=True, check=True)
-
+def minimap2_map_rescue(cdna_path, gdna_path, threads, bam_path):
+    """Run a lighter splice-aware minimap2 pass for rescue alignments."""
+    cmd = (
+        f"minimap2 -ax splice:hq -uf --secondary=yes -N 100 -t 1 "
+        f"{gdna_path} {cdna_path} | "
+        f"samtools view -@1 -hb - > {bam_path}"
+    )
+    subprocess.run(cmd, shell=True, check=True)
 
 def parse_cigar(cigartuples):
     """解析 CIGAR，返回 query 覆盖长度、对齐长度、软截断长度"""

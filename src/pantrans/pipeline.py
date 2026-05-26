@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import logging
 from typing import Iterable
 from .common_func import (
@@ -7,12 +9,17 @@ from .common_func import (
     get_bed_rows,
     cluster2dic,
     extract_fasta_subset_by_names,
+    extract_transcripts_by_gene_names,
+    extract_fasta_records_by_exact_names,
+    build_transcript_index,
+    write_transcripts_from_index,
+    extract_fasta_records_by_exact_names_indexed,
     concat_fasta_files,
     concat_text_files,
 )
-from .align_filter import minimap2_map, filter_bam
+from .align_filter import minimap2_map, minimap2_map_rescue, filter_bam
 from .construct_di_graph import assign_sccs, di_graph_from_pair, get_conn_comp
-from .transcript_processor import transcript_dedup, get_cdna_from_gtf, get_subset_bed
+from .transcript_processor import transcript_dedup, get_cdna_from_gtf, get_subset_bed, sort_gtf_by_gene_id
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +89,12 @@ def _normalize_chrom_label(chrom):
 def _build_gene_rename_map(cluster_dic, bed_path, variety_li, prefix, refer_prefixes=None):
     bed_rows = get_bed_rows(bed_path)
     bed_chrom_by_gene = {}
+    bed_order_by_gene = {}
     chrom_variety_rows = {}
     normalized_variety_li = ["Refer"] + [v for v in variety_li if v != "Refer"] if refer_prefixes else variety_li[:]
-    for chrom, start, end, gene_id, strand in bed_rows:
+    for index, (chrom, start, end, gene_id, strand) in enumerate(bed_rows):
         bed_chrom_by_gene[gene_id] = chrom
+        bed_order_by_gene[gene_id] = index
         chrom_label = _normalize_chrom_label(chrom)
         chrom_variety_rows.setdefault(chrom_label, {variety: [] for variety in normalized_variety_li})
         if refer_prefixes and gene_id.startswith(tuple(refer_prefixes)):
@@ -107,23 +116,29 @@ def _build_gene_rename_map(cluster_dic, bed_path, variety_li, prefix, refer_pref
                 if row_idx < len(rows):
                     row_gene_index[rows[row_idx]] = row_idx + 1
 
-    rename_map = {}
+    chrom_hub_dic = {}
     for refer_gene in cluster_dic.keys():
         chrom = bed_chrom_by_gene.get(refer_gene, "Ctg")
         chrom_label = _normalize_chrom_label(chrom)
-        if refer_gene in row_gene_index:
-            row_num = row_gene_index[refer_gene]
-        else:
-            used_row_nums = []
-            for renamed_gene in rename_map.values():
-                if renamed_gene.startswith(f"{prefix}{chrom_label}"):
-                    used_row_nums.append(int(renamed_gene[len(prefix + chrom_label):]))
-            row_num = max(used_row_nums, default=0) + 1
-        rename_map[refer_gene] = f"{prefix}{chrom_label}{row_num:06d}"
+        chrom_hub_dic.setdefault(chrom_label, []).append(refer_gene)
+
+    rename_map = {}
+    for chrom_label in sorted(chrom_hub_dic.keys()):
+        sorted_hubs = sorted(
+            chrom_hub_dic[chrom_label],
+            key=lambda gene_id: (
+                row_gene_index.get(gene_id, float("inf")),
+                bed_order_by_gene.get(gene_id, float("inf")),
+                gene_id,
+            ),
+        )
+        for index, refer_gene in enumerate(sorted_hubs, start=1):
+            rename_map[refer_gene] = f"{prefix}{chrom_label}{index:06d}"
     return rename_map
 
 def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_path,
-                           trans_len_dic, gene_len_dic, gene_strand_dic, rename_map, out_dir, prefix, label):
+                           trans_len_dic, gene_len_dic, gene_strand_dic, rename_map, out_dir, prefix, label,
+                           all_cdna_path=None, threads=8, enable_rescue=False, pre_gtf_path=None):
     label_suffix = f"_{label}" if label else ""
     gtf_path = os.path.join(out_dir, f"{prefix}{label_suffix}.gtf")
     gdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_gdna.refer.fasta")
@@ -140,10 +155,247 @@ def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_
         rename_map=rename_map,
         gtf_path=gtf_path,
     )
+    if enable_rescue:
+        _rescue_missing_cluster_genes(
+            cluster_dic=cluster_dic,
+            gtf_path=gtf_path,
+            all_cdna_path=all_cdna_path,
+            all_gdna_path=all_gdna_path,
+            all_bed_path=all_bed_path,
+            rename_map=rename_map,
+            out_dir=out_dir,
+            prefix=prefix,
+            label=label,
+            threads=threads,
+            pre_gtf_path=pre_gtf_path,
+        )
+    if rename_map:
+        sort_gtf_by_gene_id(gtf_path)
     extract_fasta_subset_by_names(all_gdna_path, refer_gene_li, gdna_path)
     get_cdna_from_gtf(all_gdna_path, gtf_path, cdna_path)
     get_subset_bed(refer_gene_li, all_bed_path, bed_path)
     return gtf_path, cdna_path, gdna_path, bed_path
+
+def _get_gtf_hub_genes(gtf_path):
+    genes = set()
+    with open(gtf_path, "rt") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) == 9 and fields[2] == "transcript":
+                genes.add(fields[0])
+    return genes
+
+def _append_file_contents(src_path, dst_path):
+    with open(dst_path, "a") as dst, open(src_path, "rt") as src:
+        for line in src:
+            dst.write(line)
+
+def _merge_bam_files(bam_paths, merged_bam_path):
+    if not bam_paths:
+        return False
+    if len(bam_paths) == 1:
+        shutil.copyfile(bam_paths[0], merged_bam_path)
+        return True
+    subprocess.run(["samtools", "merge", "-f", merged_bam_path] + bam_paths, check=True)
+    return True
+
+def _parse_gtf_attrs(attrs):
+    parsed = {}
+    for item in attrs.strip().split(";"):
+        item = item.strip()
+        if not item or " " not in item:
+            continue
+        key, value = item.replace('"', "").split(" ", 1)
+        parsed[key] = value
+    return parsed
+
+def _format_gtf_attrs(transcript_id, gene_id):
+    return f'transcript_id "{transcript_id}"; gene_id "{gene_id}";'
+
+def _extract_gtf_records_by_gene(gtf_path, gene_ids):
+    records_by_gene = {gene_id: [] for gene_id in gene_ids}
+    with open(gtf_path, "rt") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) != 9 or fields[2] not in {"transcript", "exon"}:
+                continue
+            gene_id = fields[0]
+            if gene_id in records_by_gene:
+                records_by_gene[gene_id].append(fields)
+    return records_by_gene
+
+def _append_rescue_records_from_gtf(dst_gtf_path, rescue_records_by_gene, rename_map):
+    rescued_genes = set()
+    with open(dst_gtf_path, "a") as dst:
+        for gene_id in sorted(rescue_records_by_gene):
+            records = rescue_records_by_gene[gene_id]
+            if not records:
+                continue
+            output_gene_id = rename_map.get(gene_id, gene_id) if rename_map else gene_id
+            transcript_counter = 0
+            transcript_id_map = {}
+            for fields in records:
+                new_fields = fields[:]
+                attrs = _parse_gtf_attrs(new_fields[8])
+                old_transcript_id = attrs.get("transcript_id", "")
+                if new_fields[2] == "transcript":
+                    transcript_counter += 1
+                    transcript_id_map[old_transcript_id] = f"{output_gene_id}.{transcript_counter}"
+                new_transcript_id = transcript_id_map.get(old_transcript_id)
+                if not new_transcript_id:
+                    transcript_counter = max(transcript_counter, 1)
+                    new_transcript_id = f"{output_gene_id}.{transcript_counter}"
+                    transcript_id_map[old_transcript_id] = new_transcript_id
+                new_fields[8] = _format_gtf_attrs(new_transcript_id, output_gene_id)
+                dst.write("\t".join(new_fields) + "\n")
+            rescued_genes.add(gene_id)
+    return rescued_genes
+
+def _rescue_missing_cluster_genes(cluster_dic, gtf_path, all_cdna_path, all_gdna_path, all_bed_path,
+                                  rename_map, out_dir, prefix, label, threads, pre_gtf_path=None):
+    gtf_gene_set = _get_gtf_hub_genes(gtf_path)
+    missing_cluster_dic = {
+        hub: members
+        for hub, members in cluster_dic.items()
+        if hub not in gtf_gene_set
+    }
+    if not missing_cluster_dic:
+        return 0
+
+    rescued_from_pre = set()
+    if pre_gtf_path and os.path.exists(pre_gtf_path):
+        pre_records_by_gene = _extract_gtf_records_by_gene(pre_gtf_path, missing_cluster_dic.keys())
+        rescued_from_pre = _append_rescue_records_from_gtf(gtf_path, pre_records_by_gene, rename_map)
+        if rescued_from_pre:
+            logger.info(
+                "Recovered %d missing last-cluster genes directly from pre-cluster GTF.",
+                len(rescued_from_pre),
+            )
+    missing_cluster_dic = {
+        hub: members
+        for hub, members in missing_cluster_dic.items()
+        if hub not in rescued_from_pre
+    }
+    if not missing_cluster_dic:
+        return len(rescued_from_pre)
+
+    rescue_gene_names = sorted({gene for members in missing_cluster_dic.values() for gene in members})
+
+    label_suffix = f"_{label}" if label else ""
+    rescue_cdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue.cdna.fasta")
+    rescue_gdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue.gdna.fasta")
+    rescue_bed_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue.bed")
+    rescue_bam_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_cdna_align_gdna.bam")
+    rescue_filtered_bam_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_cdna_align_gdna.filtered.bam")
+    rescue_gtf_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue.gtf")
+    rescue_work_dir = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_work")
+    transcript_index = build_transcript_index(all_cdna_path)
+
+    kept_transcripts = write_transcripts_from_index(transcript_index, rescue_gene_names, rescue_cdna_path)
+    if kept_transcripts == 0:
+        logger.warning(
+            "No rescue transcripts were found for %d missing clusters (%d genes).",
+            len(missing_cluster_dic),
+            len(rescue_gene_names),
+        )
+        return 0
+    kept_genes = extract_fasta_records_by_exact_names_indexed(all_gdna_path, rescue_gene_names, rescue_gdna_path)
+    if kept_genes == 0:
+        logger.warning(
+            "No rescue genomic sequences were found for %d missing clusters (%d genes).",
+            len(missing_cluster_dic),
+            len(rescue_gene_names),
+        )
+        return 0
+    get_subset_bed(rescue_gene_names, all_bed_path, rescue_bed_path)
+
+    logger.info(
+        "Run rescue alignment for %d missing clusters covering %d genes",
+        len(missing_cluster_dic),
+        len(rescue_gene_names),
+    )
+    if os.path.isdir(rescue_work_dir):
+        shutil.rmtree(rescue_work_dir)
+    os.makedirs(rescue_work_dir)
+
+    single_cluster_dic = {hub: members for hub, members in missing_cluster_dic.items() if len(members) == 1}
+    multi_cluster_dic = {hub: members for hub, members in missing_cluster_dic.items() if len(members) > 1}
+    batch_raw_bams = []
+    batch_filtered_bams = []
+
+    for index, (hub, members) in enumerate(sorted(single_cluster_dic.items()), start=1):
+        batch_prefix = f"single_{index:06d}"
+        batch_cdna_path = os.path.join(rescue_work_dir, f"{batch_prefix}.cdna.fasta")
+        batch_gdna_path = os.path.join(rescue_work_dir, f"{batch_prefix}.gdna.fasta")
+        batch_bed_path = os.path.join(rescue_work_dir, f"{batch_prefix}.bed")
+        batch_bam_path = os.path.join(rescue_work_dir, f"{batch_prefix}.bam")
+        batch_filtered_bam_path = os.path.join(rescue_work_dir, f"{batch_prefix}.filtered.bam")
+
+        write_transcripts_from_index(transcript_index, members, batch_cdna_path)
+        extract_fasta_records_by_exact_names_indexed(all_gdna_path, members, batch_gdna_path)
+        get_subset_bed(members, all_bed_path, batch_bed_path)
+        minimap2_map_rescue(batch_cdna_path, batch_gdna_path, threads, batch_bam_path)
+        batch_bed_dic, _ = get_bed(batch_bed_path)
+        filter_bam(batch_bam_path, batch_filtered_bam_path, batch_bed_dic)
+        batch_raw_bams.append(batch_bam_path)
+        batch_filtered_bams.append(batch_filtered_bam_path)
+
+    if multi_cluster_dic:
+        multi_gene_names = sorted({gene for members in multi_cluster_dic.values() for gene in members})
+        batch_cdna_path = os.path.join(rescue_work_dir, "multi.cdna.fasta")
+        batch_gdna_path = os.path.join(rescue_work_dir, "multi.gdna.fasta")
+        batch_bed_path = os.path.join(rescue_work_dir, "multi.bed")
+        batch_bam_path = os.path.join(rescue_work_dir, "multi.bam")
+        batch_filtered_bam_path = os.path.join(rescue_work_dir, "multi.filtered.bam")
+
+        write_transcripts_from_index(transcript_index, multi_gene_names, batch_cdna_path)
+        extract_fasta_records_by_exact_names_indexed(all_gdna_path, multi_gene_names, batch_gdna_path)
+        get_subset_bed(multi_gene_names, all_bed_path, batch_bed_path)
+        minimap2_map_rescue(batch_cdna_path, batch_gdna_path, threads, batch_bam_path)
+        batch_bed_dic, _ = get_bed(batch_bed_path)
+        filter_bam(batch_bam_path, batch_filtered_bam_path, batch_bed_dic)
+        batch_raw_bams.append(batch_bam_path)
+        batch_filtered_bams.append(batch_filtered_bam_path)
+
+    if not _merge_bam_files(batch_raw_bams, rescue_bam_path):
+        shutil.rmtree(rescue_work_dir)
+        return len(rescued_from_pre)
+    if not _merge_bam_files(batch_filtered_bams, rescue_filtered_bam_path):
+        shutil.rmtree(rescue_work_dir)
+        return len(rescued_from_pre)
+
+    for bam_path in batch_raw_bams + batch_filtered_bams:
+        if os.path.exists(bam_path):
+            os.remove(bam_path)
+
+    rescue_gene_strand_dic = get_bed(rescue_bed_path)[1]
+    rescue_gene_len_dic = get_fasta_len(rescue_gdna_path)
+    rescue_trans_len_dic = get_fasta_len(rescue_cdna_path)
+    rescue_cluster_dic = missing_cluster_dic
+    rescue_rename_map = {
+        gene: rename_map[gene]
+        for gene in missing_cluster_dic
+        if rename_map and gene in rename_map
+    }
+
+    transcript_dedup(
+        rescue_filtered_bam_path,
+        cluster_dic=rescue_cluster_dic,
+        trans_len_dic=rescue_trans_len_dic,
+        gene_len_dic=rescue_gene_len_dic,
+        gene_strand_dic=rescue_gene_strand_dic,
+        rename_map=rescue_rename_map if rename_map else None,
+        gtf_path=rescue_gtf_path,
+    )
+
+    rescued_gene_set = _get_gtf_hub_genes(rescue_gtf_path) if os.path.exists(rescue_gtf_path) else set()
+    if rescued_gene_set:
+        _append_file_contents(rescue_gtf_path, gtf_path)
+        logger.info("Rescued %d previously missing genes into %s", len(rescued_gene_set), gtf_path)
+    else:
+        logger.warning("Rescue alignment produced no additional GTF entries.")
+    shutil.rmtree(rescue_work_dir)
+    return len(rescued_gene_set) + len(rescued_from_pre)
 
 
 def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_chrom_path, variety_li, threads, out_dir, prefix, refer_name):
@@ -201,7 +453,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
             f.write("\t".join(li) + "\n")
 
     logger.info("Produce pre-cluster transcript and sequence outputs")
-    _write_cluster_outputs(
+    pre_gtf_path, _, _, _ = _write_cluster_outputs(
         pre_cluster_dic,
         all_gdna_path,
         all_bed_path,
@@ -213,6 +465,9 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         out_dir,
         prefix,
         "pre",
+        all_cdna_path=all_cdna_path,
+        threads=threads,
+        enable_rescue=True,
     )
 
     logger.info("Produce last-cluster transcript and sequence outputs")
@@ -228,6 +483,10 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         out_dir,
         prefix,
         "",
+        all_cdna_path=all_cdna_path,
+        threads=threads,
+        enable_rescue=True,
+        pre_gtf_path=pre_gtf_path,
     )
     logger.info(f"{variety_li[-1]} construct end")
     return new_cdna_path, new_gdna_path, new_bed_path
@@ -299,7 +558,7 @@ def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_pat
             handle.write("\t".join(li) + "\n")
 
     logger.info("Produce append pre-cluster transcript and sequence outputs")
-    _write_cluster_outputs(
+    pre_gtf_path, _, _, _ = _write_cluster_outputs(
         pre_cluster_dic,
         merged_gdna_path,
         merged_bed_path,
@@ -311,6 +570,9 @@ def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_pat
         out_dir,
         prefix,
         "pre",
+        all_cdna_path=merged_cdna_path,
+        threads=threads,
+        enable_rescue=True,
     )
 
     logger.info("Produce append last-cluster transcript and sequence outputs")
@@ -326,6 +588,10 @@ def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_pat
         out_dir,
         prefix,
         "",
+        all_cdna_path=merged_cdna_path,
+        threads=threads,
+        enable_rescue=True,
+        pre_gtf_path=pre_gtf_path,
     )
 
     return merged_cdna_path, merged_gdna_path, merged_bed_path, merged_bam_path, filtered_bam_path
