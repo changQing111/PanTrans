@@ -54,6 +54,50 @@ def _collect_input_genes(bed_dic, variety_li):
         if gene_id.startswith(variety_prefixes)
     }
 
+
+def _derive_clusters_from_alignment(
+    aligned_gene_li,
+    gene_len_dic,
+    bed_dic,
+    variety_li,
+    refer_name,
+    eligible_gene_set,
+    main_chroms=None,
+    refer_prefixes=None,
+):
+    graph = di_graph_from_pair(aligned_gene_li)
+    sccs = get_conn_comp(graph)
+    eligible_gene_set = set(eligible_gene_set)
+    logger.info(
+        "Cluster graph contains %d nodes; eligible gene set contains %d genes.",
+        graph.number_of_nodes(),
+        len(eligible_gene_set),
+    )
+    pre_clusters, last_clusters = assign_sccs(
+        sccs,
+        graph,
+        gene_len_dic,
+        bed_dic,
+        variety_li,
+        refer_name,
+        main_chroms=main_chroms,
+        refer_prefixes=refer_prefixes,
+    )
+    pre_clustered = {gene for cluster in pre_clusters for gene in cluster}
+    last_clustered = {gene for cluster in last_clusters for gene in cluster}
+    missing_pre = [[gene] for gene in sorted(eligible_gene_set - pre_clustered)]
+    missing_last = [[gene] for gene in sorted(eligible_gene_set - last_clustered)]
+    if missing_pre or missing_last:
+        logger.warning(
+            "Recovered %d pre-cluster genes and %d last-cluster genes absent from the filtered graph.",
+            len(missing_pre),
+            len(missing_last),
+        )
+        pre_clusters.extend(missing_pre)
+        last_clusters.extend(missing_last)
+    return pre_clusters, last_clusters
+
+
 def _load_main_chroms(main_chrom_path):
     if not main_chrom_path:
         return None
@@ -422,22 +466,16 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     logger.info("Finish BAM filtering, generated %s", filter_bam_path)
     # Step 2: Build graph and derive final gene clusters
     logger.info("Start graph building and gene assignment")
-    G = di_graph_from_pair(aligned_gene_li)
-    sccs = get_conn_comp(G)
-
-    pre_clusters, last_clusters = assign_sccs(
-        sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=main_chroms
-    )
     input_gene_set = _collect_input_genes(bed_dic, variety_li)
-    clustered_gene_set = {gene_id for cluster in last_clusters for gene_id in cluster}
-    missing_gene_clusters = [[gene_id] for gene_id in sorted(input_gene_set - clustered_gene_set)]
-    if missing_gene_clusters:
-        logger.warning(
-            "Recovered %d genes that were absent from the filtered alignment graph.",
-            len(missing_gene_clusters),
-        )
-        pre_clusters.extend(missing_gene_clusters)
-        last_clusters.extend(missing_gene_clusters)
+    pre_clusters, last_clusters = _derive_clusters_from_alignment(
+        aligned_gene_li=aligned_gene_li,
+        gene_len_dic=gene_len_dic,
+        bed_dic=bed_dic,
+        variety_li=variety_li,
+        refer_name=refer_name,
+        eligible_gene_set=input_gene_set,
+        main_chroms=main_chroms,
+    )
     last_cluster_dic = cluster2dic(last_clusters)
     pre_cluster_dic = cluster2dic(pre_clusters)
     last_rename_map = _build_gene_rename_map(last_cluster_dic, all_bed_path, variety_li, "Pan")

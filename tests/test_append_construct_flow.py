@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -93,3 +94,72 @@ class AppendFlowUnitTest(unittest.TestCase):
         self.assertEqual(pre, [["Ref.g1", "New.g1"], ["New.g2"]])
         self.assertEqual(last, [["Ref.g1"], ["New.g1"], ["New.g2"]])
         self.assertNotIn("Ref.nonrep", [gene for cluster in pre + last for gene in cluster])
+
+    def test_construct_recovers_pre_and_last_clusters_independently(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cdna_path = os.path.join(temp_dir, "all.cdna.fasta")
+            gdna_path = os.path.join(temp_dir, "all.gdna.fasta")
+            bed_path = os.path.join(temp_dir, "all.bed")
+            bam_path = os.path.join(temp_dir, "input.bam")
+            with open(cdna_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    ">Ref.hub.1\nAAAA\n"
+                    ">Ref.member.1\nAAAA\n"
+                    ">Ref.absent.1\nAAAA\n"
+                )
+            with open(gdna_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    ">Ref.hub\nAAAA\n"
+                    ">Ref.member\nAAAA\n"
+                    ">Ref.absent\nAAAA\n"
+                )
+            with open(bed_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "chr1\t0\t4\tRef.hub\t0\t+\n"
+                    "chr1\t10\t14\tRef.member\t0\t+\n"
+                    "chr1\t20\t24\tRef.absent\t0\t+\n"
+                )
+
+            graph = mock.Mock()
+            graph.number_of_nodes.return_value = 2
+            with mock.patch.object(
+                pipeline,
+                "filter_bam",
+                return_value=([("Ref.hub", "Ref.member")], {"Ref.hub": 4}),
+            ), mock.patch.object(
+                pipeline,
+                "di_graph_from_pair",
+                return_value=graph,
+            ), mock.patch.object(
+                pipeline,
+                "get_conn_comp",
+                return_value=[("Ref.hub", "Ref.member")],
+            ), mock.patch.object(
+                pipeline,
+                "assign_sccs",
+                return_value=([['Ref.hub', 'Ref.member']], [['Ref.hub']]),
+            ), mock.patch.object(
+                pipeline,
+                "_write_cluster_outputs",
+                return_value=("output.gtf", "output.cdna", "output.gdna", "output.bed"),
+            ) as write_outputs:
+                pipeline.unit_construct(
+                    cdna_path,
+                    gdna_path,
+                    bed_path,
+                    bam_path,
+                    None,
+                    ["Ref"],
+                    1,
+                    temp_dir,
+                    "test",
+                    "Ref",
+                )
+
+            pre_clusters = list(write_outputs.call_args_list[0].args[0].values())
+            last_clusters = list(write_outputs.call_args_list[1].args[0].values())
+            self.assertIn(["Ref.hub", "Ref.member"], pre_clusters)
+            self.assertNotIn(["Ref.member"], pre_clusters)
+            self.assertIn(["Ref.absent"], pre_clusters)
+            self.assertIn(["Ref.member"], last_clusters)
+            self.assertIn(["Ref.absent"], last_clusters)
