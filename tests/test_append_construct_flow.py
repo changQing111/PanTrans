@@ -1,6 +1,5 @@
 import os
 import sys
-import tempfile
 import types
 import unittest
 from unittest import mock
@@ -10,28 +9,35 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
 
 
-def install_dependency_stubs():
-    sys.modules["pysam"] = types.ModuleType("pysam")
-
+def dependency_stubs():
+    pysam_stub = types.ModuleType("pysam")
     networkx_stub = types.ModuleType("networkx")
     networkx_stub.DiGraph = lambda: None
     networkx_stub.strongly_connected_components = lambda graph: []
-    sys.modules["networkx"] = networkx_stub
 
     bio_stub = types.ModuleType("Bio")
     bio_stub.__path__ = []
-    sys.modules["Bio"] = bio_stub
-    for name in ("Bio.SeqIO", "Bio.Seq", "Bio.SeqRecord"):
-        sys.modules[name] = types.ModuleType(name)
-    sys.modules["Bio.Seq"].Seq = str
-    sys.modules["Bio.SeqRecord"].SeqRecord = object
+    bio_seqio_stub = types.ModuleType("Bio.SeqIO")
+    bio_seq_stub = types.ModuleType("Bio.Seq")
+    bio_seq_stub.Seq = str
+    bio_seqrecord_stub = types.ModuleType("Bio.SeqRecord")
+    bio_seqrecord_stub.SeqRecord = object
+    return {
+        "pysam": pysam_stub,
+        "networkx": networkx_stub,
+        "Bio": bio_stub,
+        "Bio.SeqIO": bio_seqio_stub,
+        "Bio.Seq": bio_seq_stub,
+        "Bio.SeqRecord": bio_seqrecord_stub,
+    }
 
 
-install_dependency_stubs()
 sys.path.insert(0, SRC)
 
-from pantrans import main as pantrans_main
-from pantrans import pipeline
+# Keep fake third-party modules scoped to PanTrans's import; unittest discovery
+# can then load later test modules without inheriting these replacements.
+with mock.patch.dict(sys.modules, dependency_stubs()):
+    from pantrans import pipeline
 
 
 class AppendFlowUnitTest(unittest.TestCase):
@@ -67,4 +73,3 @@ class AppendFlowUnitTest(unittest.TestCase):
         self.assertEqual(pre, [["Ref.g1", "New.g1"], ["New.g2"]])
         self.assertEqual(last, [["Ref.g1"], ["New.g1"], ["New.g2"]])
         self.assertNotIn("Ref.nonrep", [gene for cluster in pre + last for gene in cluster])
-
