@@ -36,15 +36,24 @@ sys.path.insert(0, SRC)
 
 
 def import_pipeline_with_dependency_stubs():
+    preexisting_pantrans_modules = {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == "pantrans" or module_name.startswith("pantrans.")
+    }
     try:
         with mock.patch.dict(sys.modules, dependency_stubs()):
             from pantrans import pipeline as imported_pipeline
     finally:
-        # Retain the direct reference below, but make later test modules import
-        # PanTrans normally instead of reusing modules loaded with fake globals.
+        # Retain the direct reference below, but remove only PanTrans modules
+        # introduced with fake globals and restore entries that predated this test.
         for module_name in tuple(sys.modules):
-            if module_name == "pantrans" or module_name.startswith("pantrans."):
+            is_pantrans_module = (
+                module_name == "pantrans" or module_name.startswith("pantrans.")
+            )
+            if is_pantrans_module and module_name not in preexisting_pantrans_modules:
                 del sys.modules[module_name]
+        sys.modules.update(preexisting_pantrans_modules)
     return imported_pipeline
 
 
