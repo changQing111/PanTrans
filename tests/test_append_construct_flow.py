@@ -1,4 +1,5 @@
 import os
+import inspect
 import sys
 import tempfile
 import types
@@ -163,3 +164,137 @@ class AppendFlowUnitTest(unittest.TestCase):
             self.assertIn(["Ref.absent"], pre_clusters)
             self.assertIn(["Ref.member"], last_clusters)
             self.assertIn(["Ref.absent"], last_clusters)
+
+    def test_reference_prefix_inference_excludes_query_prefixes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bed_path = os.path.join(temp_dir, "combined.bed")
+            with open(bed_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "A1\t1\t100\tRefA.g1\t0\t+\n"
+                    "A1\t101\t200\tJM22A1.g1\t0\t+\n"
+                    "A1\t201\t300\tJM22Ctg52.g2\t0\t+\n"
+                )
+
+            reference_varieties = pipeline._infer_reference_variety_names_from_bed(
+                bed_path, ["JM22"]
+            )
+
+        self.assertEqual(reference_varieties, ["RefA"])
+
+    def test_append_gene_set_excludes_bed_only_genes(self):
+        eligible_gene_set = pipeline._validate_append_gene_set(
+            {"RefA.g1", "JM22.g1"},
+            {"RefA.g1": [], "JM22.g1": [], "RefA.nonrep": []},
+        )
+
+        self.assertEqual(eligible_gene_set, {"RefA.g1", "JM22.g1"})
+        with self.assertRaisesRegex(ValueError, "missing from append BED"):
+            pipeline._validate_append_gene_set(
+                {"RefA.g1", "JM22.g1"}, {"RefA.g1": []}
+            )
+
+    def test_append_uses_combined_bed_and_shared_clusters(self):
+        expected_parameters = [
+            "query_cdna_path",
+            "query_gdna_path",
+            "all_bed_path",
+            "refer_cdna_path",
+            "refer_gdna_path",
+            "bam_path",
+            "variety_name",
+            "threads",
+            "out_dir",
+            "prefix",
+        ]
+        self.assertEqual(
+            list(inspect.signature(pipeline.unit_append).parameters), expected_parameters
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            query_cdna_path = os.path.join(temp_dir, "query.cdna.fasta")
+            query_gdna_path = os.path.join(temp_dir, "query.gdna.fasta")
+            refer_cdna_path = os.path.join(temp_dir, "reference.cdna.fasta")
+            refer_gdna_path = os.path.join(temp_dir, "reference.gdna.fasta")
+            all_bed_path = os.path.join(temp_dir, "combined.bed")
+            bam_path = os.path.join(temp_dir, "existing.bam")
+            out_dir = os.path.join(temp_dir, "out")
+            for fasta_path in (
+                query_cdna_path,
+                query_gdna_path,
+                refer_cdna_path,
+                refer_gdna_path,
+            ):
+                with open(fasta_path, "w", encoding="utf-8"):
+                    pass
+            with open(all_bed_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "A1\t1\t100\tRefA.g1\t0\t+\n"
+                    "A1\t101\t200\tJM22.g1\t0\t+\n"
+                    "A1\t201\t300\tRefA.nonrep\t0\t+\n"
+                )
+            with open(bam_path, "w", encoding="utf-8"):
+                pass
+
+            with mock.patch.object(pipeline, "concat_fasta_files"), \
+                 mock.patch.object(
+                     pipeline,
+                     "get_fasta_len",
+                     return_value={"RefA.g1": 100, "JM22.g1": 90},
+                 ), \
+                 mock.patch.object(
+                     pipeline,
+                     "filter_bam",
+                     return_value=([], {"RefA.g1": 100, "JM22.g1": 90}),
+                 ), \
+                 mock.patch.object(
+                     pipeline,
+                     "_derive_clusters_from_alignment",
+                     return_value=([['RefA.g1'], ['JM22.g1']], [['RefA.g1'], ['JM22.g1']]),
+                 ) as derive_clusters, \
+                 mock.patch.object(
+                     pipeline,
+                     "_write_cluster_outputs",
+                     return_value=("output.gtf", "output.cdna", "output.gdna", "output.bed"),
+                 ), \
+                 mock.patch.object(pipeline, "minimap2_map") as minimap2_map:
+                pipeline.unit_append(
+                    query_cdna_path=query_cdna_path,
+                    query_gdna_path=query_gdna_path,
+                    all_bed_path=all_bed_path,
+                    refer_cdna_path=refer_cdna_path,
+                    refer_gdna_path=refer_gdna_path,
+                    bam_path=bam_path,
+                    variety_name=["JM22"],
+                    threads=1,
+                    out_dir=out_dir,
+                    prefix="Append",
+                )
+
+            derive_clusters.assert_called_once()
+            self.assertEqual(
+                derive_clusters.call_args.kwargs["eligible_gene_set"],
+                {"RefA.g1", "JM22.g1"},
+            )
+            minimap2_map.assert_not_called()
+            with open(
+                os.path.join(out_dir, "Append_merged.bed"), encoding="utf-8"
+            ) as merged_handle, open(all_bed_path, encoding="utf-8") as input_handle:
+                self.assertEqual(merged_handle.read(), input_handle.read())
+
+    def test_append_rejects_missing_bam_before_filtering(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(pipeline, "filter_bam") as filter_bam:
+                with self.assertRaises(FileNotFoundError):
+                    pipeline.unit_append(
+                        query_cdna_path=os.path.join(temp_dir, "query.cdna.fasta"),
+                        query_gdna_path=os.path.join(temp_dir, "query.gdna.fasta"),
+                        all_bed_path=os.path.join(temp_dir, "combined.bed"),
+                        refer_cdna_path=os.path.join(temp_dir, "reference.cdna.fasta"),
+                        refer_gdna_path=os.path.join(temp_dir, "reference.gdna.fasta"),
+                        bam_path=os.path.join(temp_dir, "missing.bam"),
+                        variety_name=["JM22"],
+                        threads=1,
+                        out_dir=os.path.join(temp_dir, "out"),
+                    )
+
+            filter_bam.assert_not_called()
