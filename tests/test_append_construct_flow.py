@@ -218,6 +218,8 @@ class AppendFlowUnitTest(unittest.TestCase):
             all_bed_path = os.path.join(temp_dir, "combined.bed")
             bam_path = os.path.join(temp_dir, "existing.bam")
             out_dir = os.path.join(temp_dir, "out")
+            merged_cdna_path = os.path.join(out_dir, "Append_merged.cdna.fasta")
+            merged_gdna_path = os.path.join(out_dir, "Append_merged.gdna.fasta")
             for fasta_path in (
                 query_cdna_path,
                 query_gdna_path,
@@ -235,11 +237,18 @@ class AppendFlowUnitTest(unittest.TestCase):
             with open(bam_path, "w", encoding="utf-8"):
                 pass
 
+            def get_fasta_len_for_merged_inputs(fasta_path):
+                if fasta_path == merged_cdna_path:
+                    return {"RefA.g1.1": 100, "JM22.g1.1": 90}
+                if fasta_path == merged_gdna_path:
+                    return {"RefA.g1": 100, "JM22.g1": 90}
+                self.fail(f"unexpected FASTA length lookup: {fasta_path}")
+
             with mock.patch.object(pipeline, "concat_fasta_files"), \
                  mock.patch.object(
                      pipeline,
                      "get_fasta_len",
-                     return_value={"RefA.g1": 100, "JM22.g1": 90},
+                     side_effect=get_fasta_len_for_merged_inputs,
                  ), \
                  mock.patch.object(
                      pipeline,
@@ -283,18 +292,36 @@ class AppendFlowUnitTest(unittest.TestCase):
 
     def test_append_rejects_missing_bam_before_filtering(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            query_cdna_path = os.path.join(temp_dir, "query.cdna.fasta")
+            query_gdna_path = os.path.join(temp_dir, "query.gdna.fasta")
+            refer_cdna_path = os.path.join(temp_dir, "reference.cdna.fasta")
+            refer_gdna_path = os.path.join(temp_dir, "reference.gdna.fasta")
+            all_bed_path = os.path.join(temp_dir, "combined.bed")
+            bam_path = os.path.join(temp_dir, "missing.bam")
+            for fasta_path in (
+                query_cdna_path,
+                query_gdna_path,
+                refer_cdna_path,
+                refer_gdna_path,
+            ):
+                with open(fasta_path, "w", encoding="utf-8"):
+                    pass
+            with open(all_bed_path, "w", encoding="utf-8") as handle:
+                handle.write("A1\t1\t100\tRefA.g1\t0\t+\n")
+
             with mock.patch.object(pipeline, "filter_bam") as filter_bam:
-                with self.assertRaises(FileNotFoundError):
+                with self.assertRaises(FileNotFoundError) as error:
                     pipeline.unit_append(
-                        query_cdna_path=os.path.join(temp_dir, "query.cdna.fasta"),
-                        query_gdna_path=os.path.join(temp_dir, "query.gdna.fasta"),
-                        all_bed_path=os.path.join(temp_dir, "combined.bed"),
-                        refer_cdna_path=os.path.join(temp_dir, "reference.cdna.fasta"),
-                        refer_gdna_path=os.path.join(temp_dir, "reference.gdna.fasta"),
-                        bam_path=os.path.join(temp_dir, "missing.bam"),
+                        query_cdna_path=query_cdna_path,
+                        query_gdna_path=query_gdna_path,
+                        all_bed_path=all_bed_path,
+                        refer_cdna_path=refer_cdna_path,
+                        refer_gdna_path=refer_gdna_path,
+                        bam_path=bam_path,
                         variety_name=["JM22"],
                         threads=1,
                         out_dir=os.path.join(temp_dir, "out"),
                     )
 
+            self.assertIn(bam_path, str(error.exception))
             filter_bam.assert_not_called()
