@@ -1,7 +1,7 @@
 # Append Construct-Flow Design
 
 Date: 2026-08-06
-Status: Proposed
+Status: Approved
 Branch: `codex/append-construct-flow`
 
 ## 1. Goal
