@@ -112,7 +112,7 @@ Given `--prefix test_pantrans`, PanTrans writes:
 
 ## Append
 
-Use `append` to merge a new query set with an existing reference set and re-run graph construction and transcript processing on the merged data.
+Use `append` to merge a new query set with historical representative sequences and re-run the same graph construction and transcript processing flow as `construct`.
 
 ### Command
 
@@ -121,13 +121,14 @@ pantrans append \
   --name <new_variety_file_or_list> \
   --cdna <query_cdna.fasta> \
   --gdna <query_gdna.fasta> \
-  --bed <query.bed> \
+  --bed <combined_representatives_and_query.bed> \
   --refer_cdna <refer_cdna.fasta> \
   --refer_gdna <refer_gdna.fasta> \
-  --refer_bed <refer.bed> \
   --prefix <prefix> \
   --output <output_dir>
 ```
+
+`--bed` is one combined BED: it must contain the representative gene ID (the first gene) from each historical `pre.tmp.cluster`, plus every gene from the new variety. `--refer_cdna` and `--refer_gdna` contain the corresponding historical representative sequences. `--bam` is optional; when supplied it must be the cDNA-to-gDNA BAM for these merged FASTA inputs and alignment is skipped.
 
 ### Example
 
@@ -136,10 +137,10 @@ pantrans append \
   --name JM22 \
   --cdna test/JM22_cdna.fasta \
   --gdna test/JM22.gdna.fasta \
-  --bed test/JM22_new_dedup.bed \
+  --bed test/test_pantrans_pre.refer_append_JM22.bed \
   --refer_cdna test/pantrans_construct_out/test_pantrans_pre_cdna.refer.fasta \
   --refer_gdna test/pantrans_construct_out/test_pantrans_pre_gdna.refer.fasta \
-  --refer_bed test/pantrans_construct_out/test_pantrans_pre.refer.bed \
+  --bam test/pantrans_append_laste_pre_refer_append_JM22/test_append_JM22_merged_cdna_align_gdna.bam \
   --prefix test_append_JM22 \
   --threads 32 \
   --output test/pantrans_append_out
@@ -147,16 +148,15 @@ pantrans append \
 
 ### Append workflow
 
-The current `append` implementation performs the following steps:
+The `append` workflow performs the following steps:
 
-1. Merge query and reference `cdna`, `gdna`, and `bed` inputs
+1. Merge query and historical representative `cdna` and `gdna` inputs; copy the supplied combined BED
 2. Align merged `cdna` to merged `gdna`
 3. Filter the merged BAM
-4. Rebuild graph-based `pre` and `last` clusters from the merged alignment graph
+4. Rebuild graph-based `pre` and `last` clusters from the merged alignment graph using the same clustering flow as `construct`
 5. Write `pre` and `last` GTF/FASTA/BED outputs for the merged result
 
-Important:
-`append` currently follows a re-clustering strategy. It does not preserve the original reference `pre` clusters as fixed units. New query sequences can bridge previously separate reference clusters, which may reduce the number of `pre` clusters after append.
+Historical representative genes and newly appended genes are the eligible cluster members. BED-only historical non-representative genes are excluded because they have no merged gDNA sequence.
 
 ## Output interpretation
 

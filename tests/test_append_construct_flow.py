@@ -62,6 +62,84 @@ def import_pipeline_with_dependency_stubs():
 pipeline = import_pipeline_with_dependency_stubs()
 
 
+def import_main_with_pipeline_stub():
+    preexisting_pantrans_modules = {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == "pantrans" or module_name.startswith("pantrans.")
+    }
+    try:
+        with mock.patch.dict(sys.modules, {"pantrans.pipeline": pipeline}):
+            from pantrans import main as imported_main
+    finally:
+        for module_name in tuple(sys.modules):
+            is_pantrans_module = (
+                module_name == "pantrans" or module_name.startswith("pantrans.")
+            )
+            if is_pantrans_module and module_name not in preexisting_pantrans_modules:
+                del sys.modules[module_name]
+        sys.modules.update(preexisting_pantrans_modules)
+    return imported_main
+
+
+pantrans_main = import_main_with_pipeline_stub()
+
+
+class AppendCliContractTest(unittest.TestCase):
+    def test_append_accepts_combined_bed_and_optional_bam(self):
+        args = pantrans_main.read_parameters(
+            [
+                "append",
+                "--name", "JM22",
+                "--cdna", "query.cdna.fasta",
+                "--gdna", "query.gdna.fasta",
+                "--bed", "combined.bed",
+                "--refer_cdna", "reference.cdna.fasta",
+                "--refer_gdna", "reference.gdna.fasta",
+                "--bam", "existing.bam",
+                "--output", "append_out",
+            ]
+        )
+
+        self.assertEqual(args.bed, "combined.bed")
+        self.assertEqual(args.bam, "existing.bam")
+        self.assertFalse(hasattr(args, "refer_bed"))
+        self.assertFalse(hasattr(args, "refer_cluster"))
+
+    def test_append_rejects_stale_reference_bed_option(self):
+        with self.assertRaises(SystemExit):
+            pantrans_main.read_parameters(
+                [
+                    "append",
+                    "--name", "JM22",
+                    "--cdna", "query.cdna.fasta",
+                    "--gdna", "query.gdna.fasta",
+                    "--bed", "combined.bed",
+                    "--refer_cdna", "reference.cdna.fasta",
+                    "--refer_gdna", "reference.gdna.fasta",
+                    "--refer_bed", "obsolete.bed",
+                    "--output", "append_out",
+                ]
+            )
+
+    def test_construct_cli_contract_is_unchanged(self):
+        args = pantrans_main.read_parameters(
+            [
+                "construct",
+                "--name", "RefA",
+                "--cdna", "all.cdna.fasta",
+                "--gdna", "all.gdna.fasta",
+                "--bed", "all.bed",
+                "--reference", "RefA",
+                "--prefix", "Pan",
+                "--output", "construct_out",
+            ]
+        )
+
+        self.assertEqual(args.subcommand, "construct")
+        self.assertIsNone(args.bam)
+
+
 class AppendFlowUnitTest(unittest.TestCase):
     def test_shared_clustering_recovers_pre_and_last_independently(self):
         graph = mock.Mock()

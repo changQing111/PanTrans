@@ -13,7 +13,7 @@ def setup_logging(level=logging.INFO):
     )
 
 
-def read_parameters():
+def read_parameters(argv=None):
     parser = argparse.ArgumentParser(
         description="A Scalable Approach for Constructing Pan-Genome and Pan-Transcriptome in Polyploid Organisms"
     )
@@ -83,7 +83,13 @@ def read_parameters():
         "-g", "--gdna", required=True, help="new gdna sequences path"
     )
     append_parser.add_argument(
-        "-b", "--bed", required=True, help="new bed file path"
+        "-b",
+        "--bed",
+        required=True,
+        help=(
+            "combined BED containing historical pre-cluster representative gene IDs "
+            "(the first gene of each pre cluster) plus new-variety genes"
+        ),
     )
     append_parser.add_argument(
         "--refer_cdna", required=True, help="existing pan/reference cdna fasta path"
@@ -92,7 +98,9 @@ def read_parameters():
         "--refer_gdna", required=True, help="existing pan/reference gdna fasta path"
     )
     append_parser.add_argument(
-        "--refer_bed", required=True, help="existing pan/reference bed path"
+        "--bam",
+        default=None,
+        help="existing merged cDNA-to-gDNA BAM path; skip minimap2 alignment if provided",
     )
     append_parser.add_argument(
         "-p", "--prefix", default="Append", help="output prefix"
@@ -104,7 +112,7 @@ def read_parameters():
         "-o", "--output", required=True, help="output dir"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     return args
 
@@ -132,10 +140,10 @@ def main():
         unit_append(
             query_cdna_path=args.cdna,
             query_gdna_path=args.gdna,
-            query_bed_path=args.bed,
+            all_bed_path=args.bed,
             refer_cdna_path=args.refer_cdna,
             refer_gdna_path=args.refer_gdna,
-            refer_bed_path=args.refer_bed,
+            bam_path=args.bam,
             variety_name=args.name,
             threads=args.threads,
             out_dir=args.output,
