@@ -15,7 +15,6 @@ from .common_func import (
     write_transcripts_from_index,
     extract_fasta_records_by_exact_names_indexed,
     concat_fasta_files,
-    concat_text_files,
 )
 from .align_filter import minimap2_map, minimap2_map_rescue, filter_bam
 from .construct_di_graph import assign_sccs, di_graph_from_pair, get_conn_comp
@@ -121,6 +120,60 @@ def _infer_variety_names_from_bed(bed_path):
     if not variety_li:
         raise ValueError(f"No valid variety names could be inferred from {bed_path}.")
     return variety_li
+
+
+def _infer_reference_variety_names_from_bed(bed_path, query_variety_li):
+    """Infer historical reference prefixes from a representative-plus-query BED.
+
+    Append receives a single BED containing historical representative genes and
+    the genes of the newly appended varieties.  Query variety names can be
+    prefixes (for example ``JM22`` for ``JM22A1.g1``), so they are removed by
+    prefix match before collecting the first dot-delimited component of each
+    remaining gene identifier.
+    """
+    query_variety_li = _normalize_variety_names(query_variety_li)
+    query_prefixes = tuple(query_variety_li)
+    reference_variety_li = []
+    with open(bed_path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 4 or not fields[3]:
+                continue
+            gene_id = fields[3]
+            if gene_id.startswith(query_prefixes):
+                continue
+            variety = gene_id.split(".", 1)[0]
+            if variety and variety not in reference_variety_li:
+                reference_variety_li.append(variety)
+    if not reference_variety_li:
+        raise ValueError(
+            "No reference variety prefixes could be inferred from append BED: "
+            f"{bed_path}."
+        )
+    return reference_variety_li
+
+
+def _validate_append_gene_set(sequence_gene_set, bed_dic):
+    """Return sequence-backed append genes after enforcing BED consistency."""
+    sequence_gene_set = set(sequence_gene_set)
+    bed_gene_set = set(bed_dic)
+    missing_bed_genes = sorted(sequence_gene_set - bed_gene_set)
+    if missing_bed_genes:
+        preview = ", ".join(missing_bed_genes[:10])
+        suffix = "..." if len(missing_bed_genes) > 10 else ""
+        raise ValueError(
+            "Merged gDNA genes are missing from append BED: "
+            f"{preview}{suffix}"
+        )
+
+    bed_only_genes = bed_gene_set - sequence_gene_set
+    if bed_only_genes:
+        logger.warning(
+            "Excluded %d append BED-only genes that have no merged gDNA sequence.",
+            len(bed_only_genes),
+        )
+    return sequence_gene_set
+
 
 def _normalize_chrom_label(chrom):
     chrom = chrom.strip()
@@ -529,8 +582,8 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     logger.info(f"{variety_li[-1]} construct end")
     return new_cdna_path, new_gdna_path, new_bed_path
 
-def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_path, refer_gdna_path, refer_bed_path,
-                variety_name, threads, out_dir, prefix="Append"):
+def unit_append(query_cdna_path, query_gdna_path, all_bed_path, refer_cdna_path, refer_gdna_path,
+                bam_path, variety_name, threads, out_dir, prefix="Append"):
     os.makedirs(out_dir, exist_ok=True)
     new_variety_li = _normalize_variety_names(variety_name)
 
@@ -540,44 +593,47 @@ def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_pat
     merged_bam_path = os.path.join(out_dir, f"{prefix}_merged_cdna_align_gdna.bam")
     filtered_bam_path = os.path.join(out_dir, f"{prefix}_merged_cdna_align_gdna.filtered.bam")
 
+    if bam_path and not os.path.isfile(bam_path):
+        raise FileNotFoundError(f"Append BAM file does not exist: {bam_path}")
+
     logger.info("Merge query and reference cDNA into %s", merged_cdna_path)
     concat_fasta_files([refer_cdna_path, query_cdna_path], merged_cdna_path)
     logger.info("Merge query and reference gDNA into %s", merged_gdna_path)
     concat_fasta_files([refer_gdna_path, query_gdna_path], merged_gdna_path)
-    logger.info("Merge query and reference BED into %s", merged_bed_path)
-    concat_text_files([refer_bed_path, query_bed_path], merged_bed_path)
+    logger.info("Copy combined representative-and-query BED into %s", merged_bed_path)
+    shutil.copyfile(all_bed_path, merged_bed_path)
 
-    logger.info("Start append alignment: merged cDNA vs merged gDNA")
-    minimap2_map(merged_cdna_path, merged_gdna_path, threads, merged_bam_path)
-    logger.info("Finish append alignment")
+    align_bam_path = bam_path or merged_bam_path
+    if bam_path:
+        logger.info("Skip append alignment; using existing BAM: %s", bam_path)
+    else:
+        logger.info("Start append alignment: merged cDNA vs merged gDNA")
+        minimap2_map(merged_cdna_path, merged_gdna_path, threads, align_bam_path)
+        logger.info("Finish append alignment")
 
     bed_dic, gene_strand_dic = get_bed(merged_bed_path)
     trans_len_dic = get_fasta_len(merged_cdna_path)
+    merged_gdna_gene_set = set(get_fasta_len(merged_gdna_path))
+    eligible_gene_set = _validate_append_gene_set(merged_gdna_gene_set, bed_dic)
     logger.info("Start append BAM filtering")
-    aligned_gene_li, gene_len_dic = filter_bam(merged_bam_path, filtered_bam_path, bed_dic)
+    aligned_gene_li, gene_len_dic = filter_bam(align_bam_path, filtered_bam_path, bed_dic)
     logger.info("Finish append BAM filtering, generated %s", filtered_bam_path)
 
-    refer_variety_li = _infer_variety_names_from_bed(refer_bed_path)
+    refer_variety_li = _infer_reference_variety_names_from_bed(merged_bed_path, new_variety_li)
     variety_li = new_variety_li[:]
     refer_name = refer_variety_li[0]
 
     logger.info("Start append graph building and gene assignment")
-    G = di_graph_from_pair(aligned_gene_li)
-    sccs = get_conn_comp(G)
-    pre_clusters, last_clusters = assign_sccs(
-        sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=None, refer_prefixes=refer_variety_li
+    pre_clusters, last_clusters = _derive_clusters_from_alignment(
+        aligned_gene_li=aligned_gene_li,
+        gene_len_dic=gene_len_dic,
+        bed_dic=bed_dic,
+        variety_li=variety_li,
+        refer_name=refer_name,
+        eligible_gene_set=eligible_gene_set,
+        main_chroms=None,
+        refer_prefixes=refer_variety_li,
     )
-
-    input_gene_set = _collect_input_genes(bed_dic, variety_li)
-    clustered_gene_set = {gene_id for cluster in last_clusters for gene_id in cluster}
-    missing_gene_clusters = [[gene_id] for gene_id in sorted(input_gene_set - clustered_gene_set)]
-    if missing_gene_clusters:
-        logger.warning(
-            "Recovered %d genes that were absent from the filtered alignment graph.",
-            len(missing_gene_clusters),
-        )
-        pre_clusters.extend(missing_gene_clusters)
-        last_clusters.extend(missing_gene_clusters)
 
     pre_cluster_dic = cluster2dic(pre_clusters)
     last_cluster_dic = cluster2dic(last_clusters)
@@ -632,4 +688,4 @@ def unit_append(query_cdna_path, query_gdna_path, query_bed_path, refer_cdna_pat
         pre_gtf_path=pre_gtf_path,
     )
 
-    return merged_cdna_path, merged_gdna_path, merged_bed_path, merged_bam_path, filtered_bam_path
+    return merged_cdna_path, merged_gdna_path, merged_bed_path, align_bam_path, filtered_bam_path
