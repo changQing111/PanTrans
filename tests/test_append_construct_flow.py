@@ -34,10 +34,21 @@ def dependency_stubs():
 
 sys.path.insert(0, SRC)
 
-# Keep fake third-party modules scoped to PanTrans's import; unittest discovery
-# can then load later test modules without inheriting these replacements.
-with mock.patch.dict(sys.modules, dependency_stubs()):
-    from pantrans import pipeline
+
+def import_pipeline_with_dependency_stubs():
+    try:
+        with mock.patch.dict(sys.modules, dependency_stubs()):
+            from pantrans import pipeline as imported_pipeline
+    finally:
+        # Retain the direct reference below, but make later test modules import
+        # PanTrans normally instead of reusing modules loaded with fake globals.
+        for module_name in tuple(sys.modules):
+            if module_name == "pantrans" or module_name.startswith("pantrans."):
+                del sys.modules[module_name]
+    return imported_pipeline
+
+
+pipeline = import_pipeline_with_dependency_stubs()
 
 
 class AppendFlowUnitTest(unittest.TestCase):
