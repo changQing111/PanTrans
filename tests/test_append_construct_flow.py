@@ -181,6 +181,20 @@ class AppendFlowUnitTest(unittest.TestCase):
 
         self.assertEqual(reference_varieties, ["RefA"])
 
+    def test_reference_prefix_inference_rejects_bed_without_reference_prefixes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bed_path = os.path.join(temp_dir, "query-only.bed")
+            with open(bed_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "A1\t1\t100\tJM22A1.g1\t0\t+\n"
+                    "A1\t101\t200\tJM22Ctg52.g2\t0\t+\n"
+                )
+
+            with self.assertRaises(ValueError) as error:
+                pipeline._infer_reference_variety_names_from_bed(bed_path, ["JM22"])
+
+        self.assertIn("reference", str(error.exception).lower())
+
     def test_append_gene_set_excludes_bed_only_genes(self):
         eligible_gene_set = pipeline._validate_append_gene_set(
             {"RefA.g1", "JM22.g1"},
@@ -244,6 +258,8 @@ class AppendFlowUnitTest(unittest.TestCase):
                     return {"RefA.g1": 100, "JM22.g1": 90}
                 self.fail(f"unexpected FASTA length lookup: {fasta_path}")
 
+            pre_clusters = [["PRE_MARKER"]]
+            last_clusters = [["LAST_MARKER"]]
             with mock.patch.object(pipeline, "concat_fasta_files"), \
                  mock.patch.object(
                      pipeline,
@@ -254,17 +270,20 @@ class AppendFlowUnitTest(unittest.TestCase):
                      pipeline,
                      "filter_bam",
                      return_value=([], {"RefA.g1": 100, "JM22.g1": 90}),
-                 ), \
+                 ) as filter_bam, \
                  mock.patch.object(
                      pipeline,
                      "_derive_clusters_from_alignment",
-                     return_value=([['RefA.g1'], ['JM22.g1']], [['RefA.g1'], ['JM22.g1']]),
+                     return_value=(pre_clusters, last_clusters),
                  ) as derive_clusters, \
                  mock.patch.object(
                      pipeline,
                      "_write_cluster_outputs",
                      return_value=("output.gtf", "output.cdna", "output.gdna", "output.bed"),
-                 ), \
+                 ) as write_outputs, \
+                 mock.patch.object(
+                     pipeline, "derive_last_clusters_from_pre", create=True
+                 ) as derive_last_clusters_from_pre, \
                  mock.patch.object(pipeline, "minimap2_map") as minimap2_map:
                 pipeline.unit_append(
                     query_cdna_path=query_cdna_path,
@@ -280,11 +299,23 @@ class AppendFlowUnitTest(unittest.TestCase):
                 )
 
             derive_clusters.assert_called_once()
+            self.assertEqual(derive_clusters.call_args.kwargs["refer_prefixes"], ["RefA"])
+            self.assertEqual(derive_clusters.call_args.kwargs["variety_li"], ["JM22"])
             self.assertEqual(
                 derive_clusters.call_args.kwargs["eligible_gene_set"],
                 {"RefA.g1", "JM22.g1"},
             )
+            filter_bam.assert_called_once()
+            self.assertEqual(filter_bam.call_args.args[0], bam_path)
             minimap2_map.assert_not_called()
+            derive_last_clusters_from_pre.assert_not_called()
+            self.assertEqual(write_outputs.call_count, 2)
+            self.assertEqual(
+                write_outputs.call_args_list[0].args[0], {"PRE_MARKER": ["PRE_MARKER"]}
+            )
+            self.assertEqual(
+                write_outputs.call_args_list[1].args[0], {"LAST_MARKER": ["LAST_MARKER"]}
+            )
             with open(
                 os.path.join(out_dir, "Append_merged.bed"), encoding="utf-8"
             ) as merged_handle, open(all_bed_path, encoding="utf-8") as input_handle:
