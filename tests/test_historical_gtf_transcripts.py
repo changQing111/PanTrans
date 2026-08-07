@@ -74,6 +74,33 @@ def test_load_gtf_transcript_models_sorts_exons_and_derives_splice_sites(tmp_pat
     assert models["splice_sites"] == {"Ref.g1.1": [(11, 20)]}
 
 
+def test_load_gtf_transcript_models_requires_transcript_feature(tmp_path):
+    history_gtf = _write_gtf(
+        tmp_path / "exon_only.gtf",
+        [
+            'Ref.g1\tPan\texon\t1\t10\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Ref.g1.1";',
+            'Ref.g1\tPan\texon\t21\t30\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Ref.g1.1";',
+        ],
+    )
+
+    with pytest.raises(ValueError, match="no transcript feature"):
+        load_gtf_transcript_models(history_gtf)
+
+
+def test_load_gtf_transcript_models_rejects_transcript_gene_id_mismatch(tmp_path):
+    history_gtf = _write_gtf(
+        tmp_path / "mismatched_transcript_gene.gtf",
+        [
+            'Ref.g1\tPan\ttranscript\t1\t30\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Other.g1.1";',
+            'Ref.g1\tPan\texon\t1\t10\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Other.g1.1";',
+            'Ref.g1\tPan\texon\t21\t30\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Other.g1.1";',
+        ],
+    )
+
+    with pytest.raises(ValueError, match="transcript_id.*gene_id"):
+        load_gtf_transcript_models(history_gtf)
+
+
 @pytest.mark.parametrize(
     "lines, message",
     [

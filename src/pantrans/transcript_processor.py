@@ -5,6 +5,8 @@ from Bio.SeqRecord import SeqRecord
 import logging
 import re
 
+from .align_filter import transcript_to_gene_id
+
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,7 @@ def load_gtf_transcript_models(gtf_path):
     transcript_gene = {}
     transcript_context = {}
     exon_coords = {}
+    transcript_features = set()
 
     with open(gtf_path, "rt") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -104,6 +107,12 @@ def load_gtf_transcript_models(gtf_path):
                     f"{gtf_path}:{line_number}: sequence name {sequence_name!r} "
                     f"does not match gene_id {gene_id!r}"
                 )
+            derived_gene_id = transcript_to_gene_id(transcript_id)
+            if derived_gene_id != gene_id:
+                raise ValueError(
+                    f"{gtf_path}:{line_number}: transcript_id {transcript_id!r} "
+                    f"maps to gene {derived_gene_id!r}, but gene_id is {gene_id!r}"
+                )
 
             try:
                 start_i = int(start)
@@ -130,6 +139,15 @@ def load_gtf_transcript_models(gtf_path):
 
             if feature == "exon":
                 exon_coords.setdefault(transcript_id, []).append((start_i, end_i))
+            else:
+                transcript_features.add(transcript_id)
+
+    missing_transcript_features = sorted(set(transcript_gene) - transcript_features)
+    if missing_transcript_features:
+        raise ValueError(
+            f"{gtf_path}: transcript {missing_transcript_features[0]!r} has no "
+            "transcript feature"
+        )
 
     splice_sites = {}
     sorted_exon_coords = {}
