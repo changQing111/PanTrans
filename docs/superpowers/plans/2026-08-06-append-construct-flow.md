@@ -1,4 +1,8 @@
-# Append Construct-Flow Implementation Plan
+# Append Construct-Flow Implementation Plan (Superseded)
+
+> This plan describes the earlier representative-only append implementation and
+> is retained as development history. The active implementation plan is
+> `2026-08-06-incremental-graph-append.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

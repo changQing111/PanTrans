@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pantrans"                  
-version = "0.1.0"
+version = "0.3.0"
 description = "A Scalable Approach for Constructing Pan-Genome and Pan-Transcriptome in Polyploid Organisms"
 readme = "README.md"
 requires-python = ">=3.8"

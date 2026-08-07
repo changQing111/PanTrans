@@ -3,6 +3,7 @@ import Bio.SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import logging
+import os
 import re
 
 from .align_filter import transcript_to_gene_id
@@ -177,6 +178,82 @@ def load_gtf_transcript_models(gtf_path):
         "splice_sites": splice_sites,
         "exon_coords": sorted_exon_coords,
     }
+
+
+def _replace_gtf_attribute_values(attr_text, replacements):
+    rewritten = []
+    seen = set()
+    for raw_item in attr_text.strip().split(";"):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if " " not in item:
+            raise ValueError(f"Malformed GTF attribute {item!r}")
+        key, _ = item.split(None, 1)
+        if key in replacements:
+            item = f'{key} "{replacements[key]}"'
+            seen.add(key)
+        rewritten.append(item)
+    missing = sorted(set(replacements) - seen)
+    if missing:
+        raise ValueError("GTF record is missing " + ", ".join(missing))
+    return "; ".join(rewritten) + ";"
+
+
+def rename_gtf_ids(source_path, output_path, rename_map):
+    """Rename GTF gene/transcript attributes while keeping source coordinates."""
+    output_path = str(output_path)
+    temporary_path = output_path + ".tmp"
+    try:
+        with open(source_path, "rt") as source, open(temporary_path, "wt") as output:
+            for line_number, line in enumerate(source, start=1):
+                stripped = line.rstrip("\n")
+                if not stripped or stripped.startswith("#"):
+                    output.write(line)
+                    continue
+
+                fields = stripped.split("\t")
+                if len(fields) != 9:
+                    raise ValueError(
+                        f"{source_path}:{line_number}: expected 9 tab-separated GTF fields"
+                    )
+                attrs = _parse_gtf_attributes(fields[8])
+                gene_id = attrs.get("gene_id")
+                transcript_id = attrs.get("transcript_id")
+                if not gene_id or not transcript_id:
+                    raise ValueError(
+                        f"{source_path}:{line_number}: record is missing gene_id or transcript_id"
+                    )
+                if fields[0] != gene_id:
+                    raise ValueError(
+                        f"{source_path}:{line_number}: sequence name {fields[0]!r} "
+                        f"does not match gene_id {gene_id!r}"
+                    )
+                prefix, separator, suffix = transcript_id.rpartition(".")
+                if not separator or prefix != gene_id or not suffix.isdigit():
+                    raise ValueError(
+                        f"{source_path}:{line_number}: transcript_id {transcript_id!r} "
+                        f"must use gene_id {gene_id!r} plus a numeric suffix"
+                    )
+                if gene_id not in rename_map:
+                    raise ValueError(
+                        f"{source_path}:{line_number}: no renamed ID for gene {gene_id!r}"
+                    )
+
+                renamed_gene = rename_map[gene_id]
+                fields[8] = _replace_gtf_attribute_values(
+                    fields[8],
+                    {
+                        "gene_id": renamed_gene,
+                        "transcript_id": f"{renamed_gene}.{suffix}",
+                    },
+                )
+                output.write("\t".join(fields) + "\n")
+        os.replace(temporary_path, output_path)
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
 
 def _pan_gene_sort_key(gene_id):
     if not gene_id.startswith("Pan"):

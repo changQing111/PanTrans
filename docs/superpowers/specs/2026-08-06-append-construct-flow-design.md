@@ -1,8 +1,13 @@
 # Append Construct-Flow Design
 
 Date: 2026-08-06
-Status: Approved
+Status: Superseded by `2026-08-06-incremental-graph-append-design.md`
 Branch: `codex/append-construct-flow`
+
+> This earlier representative-only design is retained for history. The current
+> implementation uses a complete historical graph package plus two incremental
+> cross-alignment blocks; use the superseding design and README for the active
+> interface.
 
 ## 1. Goal
 

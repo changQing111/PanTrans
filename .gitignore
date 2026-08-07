@@ -25,3 +25,5 @@ test/*.bed
 # Generated outputs
 test/pantrans_construct_out/
 test/pantrans_append_out/
+validation/*
+!validation/*.slurm

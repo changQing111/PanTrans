@@ -77,7 +77,20 @@ def read_parameters(argv=None):
         help="new variety names (file path, comma-separated list, or space-separated list)",
     )
     append_parser.add_argument(
-        "-c", "--cdna", required=True, help="new cdna sequences path"
+        "-c",
+        "--cdna",
+        required=True,
+        help="previous unrenamed final cDNA sequences path",
+    )
+    append_parser.add_argument(
+        "--history-gtf",
+        required=True,
+        help="previous unrenamed final GTF path",
+    )
+    append_parser.add_argument(
+        "--query-cdna",
+        required=True,
+        help="new-variety cDNA sequences path",
     )
     append_parser.add_argument(
         "-g", "--gdna", required=True, help="new gdna sequences path"
@@ -92,21 +105,25 @@ def read_parameters(argv=None):
         ),
     )
     append_parser.add_argument(
-        "--refer_cdna", required=True, help="existing pan/reference cdna fasta path"
-    )
-    append_parser.add_argument(
-        "--refer_gdna", required=True, help="existing pan/reference gdna fasta path"
-    )
-    append_parser.add_argument(
-        "--bam",
-        default=None,
-        help="existing merged cDNA-to-gDNA BAM path; skip minimap2 alignment if provided",
+        "--history-graph",
+        required=True,
+        help="graph package emitted by the historical construct run",
     )
     append_parser.add_argument(
         "-p", "--prefix", default="Append", help="output prefix"
     )
     append_parser.add_argument(
         "-t", "--threads", type=int, default=8, help="number of threads for minimap2"
+    )
+    append_parser.add_argument(
+        "--query-to-all-bam",
+        default=None,
+        help="reuse an existing new-cDNA to merged-gDNA BAM",
+    )
+    append_parser.add_argument(
+        "--history-to-query-bam",
+        default=None,
+        help="reuse an existing historical-cDNA to new-gDNA BAM",
     )
     append_parser.add_argument(
         "-o", "--output", required=True, help="output dir"
@@ -138,16 +155,18 @@ def main():
 
     elif args.subcommand == "append":
         unit_append(
-            query_cdna_path=args.cdna,
+            history_cdna_path=args.cdna,
+            history_gtf_path=args.history_gtf,
+            query_cdna_path=args.query_cdna,
             query_gdna_path=args.gdna,
             all_bed_path=args.bed,
-            refer_cdna_path=args.refer_cdna,
-            refer_gdna_path=args.refer_gdna,
-            bam_path=args.bam,
+            history_graph_path=args.history_graph,
             variety_name=args.name,
             threads=args.threads,
             out_dir=args.output,
             prefix=args.prefix,
+            query_to_all_bam=args.query_to_all_bam,
+            history_to_query_bam=args.history_to_query_bam,
         )
         return 0
 

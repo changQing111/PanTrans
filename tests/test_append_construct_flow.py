@@ -86,38 +86,65 @@ pantrans_main = import_main_with_pipeline_stub()
 
 
 class AppendCliContractTest(unittest.TestCase):
-    def test_append_accepts_combined_bed_and_optional_bam(self):
+    def test_append_accepts_history_graph_and_combined_bed(self):
         args = pantrans_main.read_parameters(
             [
                 "append",
                 "--name", "JM22",
-                "--cdna", "query.cdna.fasta",
+                "--cdna", "history.unrenamed.cdna.fasta",
+                "--history-gtf", "history.unrenamed.gtf",
+                "--query-cdna", "query.cdna.fasta",
                 "--gdna", "query.gdna.fasta",
                 "--bed", "combined.bed",
-                "--refer_cdna", "reference.cdna.fasta",
-                "--refer_gdna", "reference.gdna.fasta",
-                "--bam", "existing.bam",
+                "--history-graph", "history.graph.json",
                 "--output", "append_out",
             ]
         )
 
         self.assertEqual(args.bed, "combined.bed")
-        self.assertEqual(args.bam, "existing.bam")
+        self.assertEqual(args.cdna, "history.unrenamed.cdna.fasta")
+        self.assertEqual(args.history_gtf, "history.unrenamed.gtf")
+        self.assertEqual(args.query_cdna, "query.cdna.fasta")
+        self.assertEqual(args.history_graph, "history.graph.json")
+        self.assertIsNone(args.query_to_all_bam)
+        self.assertIsNone(args.history_to_query_bam)
         self.assertFalse(hasattr(args, "refer_bed"))
         self.assertFalse(hasattr(args, "refer_cluster"))
+        self.assertFalse(hasattr(args, "refer_cdna"))
+        self.assertFalse(hasattr(args, "refer_gdna"))
 
-    def test_append_rejects_stale_reference_bed_option(self):
+    def test_append_requires_history_gtf_and_query_cdna(self):
+        base_args = [
+            "append",
+            "--name", "JM22",
+            "--cdna", "history.unrenamed.cdna.fasta",
+            "--history-gtf", "history.unrenamed.gtf",
+            "--query-cdna", "query.cdna.fasta",
+            "--gdna", "query.gdna.fasta",
+            "--bed", "combined.bed",
+            "--history-graph", "history.graph.json",
+            "--output", "append_out",
+        ]
+        for option in ("--history-gtf", "--query-cdna"):
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                option_index = base_args.index(option)
+                pantrans_main.read_parameters(
+                    base_args[:option_index] + base_args[option_index + 2 :]
+                )
+
+    def test_append_rejects_stale_representative_sequence_options(self):
         with self.assertRaises(SystemExit):
             pantrans_main.read_parameters(
                 [
                     "append",
                     "--name", "JM22",
-                    "--cdna", "query.cdna.fasta",
+                    "--cdna", "history.unrenamed.cdna.fasta",
+                    "--history-gtf", "history.unrenamed.gtf",
+                    "--query-cdna", "query.cdna.fasta",
                     "--gdna", "query.gdna.fasta",
                     "--bed", "combined.bed",
-                    "--refer_cdna", "reference.cdna.fasta",
-                    "--refer_gdna", "reference.gdna.fasta",
-                    "--refer_bed", "obsolete.bed",
+                    "--history-graph", "history.graph.json",
+                    "--refer_cdna", "obsolete.cdna.fasta",
                     "--output", "append_out",
                 ]
             )
@@ -141,6 +168,83 @@ class AppendCliContractTest(unittest.TestCase):
 
 
 class AppendFlowUnitTest(unittest.TestCase):
+    def test_write_cluster_outputs_creates_unrenamed_and_official_transcriptomes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rename_map = {"Ref.g1": "Pan1A000001"}
+            history_gtf = os.path.join(temp_dir, "history.gtf")
+
+            with mock.patch.object(pipeline, "transcript_dedup") as dedup_mock, \
+                 mock.patch.object(
+                     pipeline, "_rescue_missing_cluster_genes"
+                 ) as rescue_mock, \
+                 mock.patch.object(pipeline, "rename_gtf_ids") as rename_mock, \
+                 mock.patch.object(pipeline, "sort_gtf_by_gene_id") as sort_mock, \
+                 mock.patch.object(
+                     pipeline, "extract_fasta_subset_by_names"
+                 ) as gdna_mock, \
+                 mock.patch.object(pipeline, "get_cdna_from_gtf") as cdna_mock, \
+                 mock.patch.object(pipeline, "get_subset_bed") as bed_mock:
+                result = pipeline._write_cluster_outputs(
+                    cluster_dic={"Ref.g1": ["Ref.g1", "JM22.g1"]},
+                    all_gdna_path="merged.gdna.fasta",
+                    all_bed_path="merged.bed",
+                    filter_bam_path="merged.filtered.bam",
+                    trans_len_dic={"Ref.g1.1": 20},
+                    gene_len_dic={"Ref.g1": 100},
+                    gene_strand_dic={"Ref.g1": "+"},
+                    rename_map=rename_map,
+                    out_dir=temp_dir,
+                    prefix="Pan",
+                    label="",
+                    all_cdna_path="merged.cdna.fasta",
+                    threads=4,
+                    enable_rescue=True,
+                    pre_gtf_path="pre.gtf",
+                    seed_gtf_path=history_gtf,
+                )
+
+            official_gtf = os.path.join(temp_dir, "Pan.gtf")
+            unrenamed_gtf = os.path.join(temp_dir, "Pan_unrenamed.gtf")
+            official_cdna = os.path.join(temp_dir, "Pan_cdna.refer.fasta")
+            unrenamed_cdna = os.path.join(
+                temp_dir, "Pan_unrenamed_cdna.refer.fasta"
+            )
+
+            dedup_mock.assert_called_once_with(
+                "merged.filtered.bam",
+                cluster_dic={"Ref.g1": ["Ref.g1", "JM22.g1"]},
+                trans_len_dic={"Ref.g1.1": 20},
+                gene_len_dic={"Ref.g1": 100},
+                gene_strand_dic={"Ref.g1": "+"},
+                rename_map=None,
+                gtf_path=unrenamed_gtf,
+                seed_gtf_path=history_gtf,
+            )
+            self.assertEqual(rescue_mock.call_args.kwargs["gtf_path"], unrenamed_gtf)
+            self.assertIsNone(rescue_mock.call_args.kwargs["rename_map"])
+            rename_mock.assert_called_once_with(
+                unrenamed_gtf, official_gtf, rename_map
+            )
+            sort_mock.assert_called_once_with(official_gtf)
+            self.assertEqual(
+                cdna_mock.call_args_list,
+                [
+                    mock.call("merged.gdna.fasta", unrenamed_gtf, unrenamed_cdna),
+                    mock.call("merged.gdna.fasta", official_gtf, official_cdna),
+                ],
+            )
+            gdna_mock.assert_called_once()
+            bed_mock.assert_called_once()
+            self.assertEqual(
+                result,
+                (
+                    official_gtf,
+                    official_cdna,
+                    os.path.join(temp_dir, "Pan_gdna.refer.fasta"),
+                    os.path.join(temp_dir, "Pan.refer.bed"),
+                ),
+            )
+
     def test_shared_clustering_recovers_pre_and_last_independently(self):
         graph = mock.Mock()
         graph.number_of_nodes.return_value = 2
@@ -221,7 +325,18 @@ class AppendFlowUnitTest(unittest.TestCase):
                 pipeline,
                 "_write_cluster_outputs",
                 return_value=("output.gtf", "output.cdna", "output.gdna", "output.bed"),
-            ) as write_outputs:
+            ) as write_outputs, mock.patch.object(
+                pipeline,
+                "bam_alignment_provenance",
+                return_value={
+                    "minimap2_version": "test",
+                    "minimap2_options": "test-options",
+                    "filter_thresholds": {},
+                },
+            ), mock.patch.object(
+                pipeline,
+                "write_graph_package",
+            ):
                 pipeline.unit_construct(
                     cdna_path,
                     gdna_path,
@@ -243,36 +358,6 @@ class AppendFlowUnitTest(unittest.TestCase):
             self.assertIn(["Ref.member"], last_clusters)
             self.assertIn(["Ref.absent"], last_clusters)
 
-    def test_reference_prefix_inference_excludes_query_prefixes(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            bed_path = os.path.join(temp_dir, "combined.bed")
-            with open(bed_path, "w", encoding="utf-8") as handle:
-                handle.write(
-                    "A1\t1\t100\tRefA.g1\t0\t+\n"
-                    "A1\t101\t200\tJM22A1.g1\t0\t+\n"
-                    "A1\t201\t300\tJM22Ctg52.g2\t0\t+\n"
-                )
-
-            reference_varieties = pipeline._infer_reference_variety_names_from_bed(
-                bed_path, ["JM22"]
-            )
-
-        self.assertEqual(reference_varieties, ["RefA"])
-
-    def test_reference_prefix_inference_rejects_bed_without_reference_prefixes(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            bed_path = os.path.join(temp_dir, "query-only.bed")
-            with open(bed_path, "w", encoding="utf-8") as handle:
-                handle.write(
-                    "A1\t1\t100\tJM22A1.g1\t0\t+\n"
-                    "A1\t101\t200\tJM22Ctg52.g2\t0\t+\n"
-                )
-
-            with self.assertRaises(ValueError) as error:
-                pipeline._infer_reference_variety_names_from_bed(bed_path, ["JM22"])
-
-        self.assertIn("reference", str(error.exception).lower())
-
     def test_append_gene_set_excludes_bed_only_genes(self):
         eligible_gene_set = pipeline._validate_append_gene_set(
             {"RefA.g1", "JM22.g1"},
@@ -284,153 +369,3 @@ class AppendFlowUnitTest(unittest.TestCase):
             pipeline._validate_append_gene_set(
                 {"RefA.g1", "JM22.g1"}, {"RefA.g1": []}
             )
-
-    def test_append_uses_combined_bed_and_shared_clusters(self):
-        expected_parameters = [
-            "query_cdna_path",
-            "query_gdna_path",
-            "all_bed_path",
-            "refer_cdna_path",
-            "refer_gdna_path",
-            "bam_path",
-            "variety_name",
-            "threads",
-            "out_dir",
-            "prefix",
-        ]
-        self.assertEqual(
-            list(inspect.signature(pipeline.unit_append).parameters), expected_parameters
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            query_cdna_path = os.path.join(temp_dir, "query.cdna.fasta")
-            query_gdna_path = os.path.join(temp_dir, "query.gdna.fasta")
-            refer_cdna_path = os.path.join(temp_dir, "reference.cdna.fasta")
-            refer_gdna_path = os.path.join(temp_dir, "reference.gdna.fasta")
-            all_bed_path = os.path.join(temp_dir, "combined.bed")
-            bam_path = os.path.join(temp_dir, "existing.bam")
-            out_dir = os.path.join(temp_dir, "out")
-            merged_cdna_path = os.path.join(out_dir, "Append_merged.cdna.fasta")
-            merged_gdna_path = os.path.join(out_dir, "Append_merged.gdna.fasta")
-            for fasta_path in (
-                query_cdna_path,
-                query_gdna_path,
-                refer_cdna_path,
-                refer_gdna_path,
-            ):
-                with open(fasta_path, "w", encoding="utf-8"):
-                    pass
-            with open(all_bed_path, "w", encoding="utf-8") as handle:
-                handle.write(
-                    "A1\t1\t100\tRefA.g1\t0\t+\n"
-                    "A1\t101\t200\tJM22.g1\t0\t+\n"
-                    "A1\t201\t300\tRefA.nonrep\t0\t+\n"
-                )
-            with open(bam_path, "w", encoding="utf-8"):
-                pass
-
-            def get_fasta_len_for_merged_inputs(fasta_path):
-                if fasta_path == merged_cdna_path:
-                    return {"RefA.g1.1": 100, "JM22.g1.1": 90}
-                if fasta_path == merged_gdna_path:
-                    return {"RefA.g1": 100, "JM22.g1": 90}
-                self.fail(f"unexpected FASTA length lookup: {fasta_path}")
-
-            pre_clusters = [["PRE_MARKER"]]
-            last_clusters = [["LAST_MARKER"]]
-            with mock.patch.object(pipeline, "concat_fasta_files"), \
-                 mock.patch.object(
-                     pipeline,
-                     "get_fasta_len",
-                     side_effect=get_fasta_len_for_merged_inputs,
-                 ), \
-                 mock.patch.object(
-                     pipeline,
-                     "filter_bam",
-                     return_value=([], {"RefA.g1": 100, "JM22.g1": 90}),
-                 ) as filter_bam, \
-                 mock.patch.object(
-                     pipeline,
-                     "_derive_clusters_from_alignment",
-                     return_value=(pre_clusters, last_clusters),
-                 ) as derive_clusters, \
-                 mock.patch.object(
-                     pipeline,
-                     "_write_cluster_outputs",
-                     return_value=("output.gtf", "output.cdna", "output.gdna", "output.bed"),
-                 ) as write_outputs, \
-                 mock.patch.object(
-                     pipeline, "derive_last_clusters_from_pre", create=True
-                 ) as derive_last_clusters_from_pre, \
-                 mock.patch.object(pipeline, "minimap2_map") as minimap2_map:
-                pipeline.unit_append(
-                    query_cdna_path=query_cdna_path,
-                    query_gdna_path=query_gdna_path,
-                    all_bed_path=all_bed_path,
-                    refer_cdna_path=refer_cdna_path,
-                    refer_gdna_path=refer_gdna_path,
-                    bam_path=bam_path,
-                    variety_name=["JM22"],
-                    threads=1,
-                    out_dir=out_dir,
-                    prefix="Append",
-                )
-
-            derive_clusters.assert_called_once()
-            self.assertEqual(derive_clusters.call_args.kwargs["refer_prefixes"], ["RefA"])
-            self.assertEqual(derive_clusters.call_args.kwargs["variety_li"], ["JM22"])
-            self.assertEqual(
-                derive_clusters.call_args.kwargs["eligible_gene_set"],
-                {"RefA.g1", "JM22.g1"},
-            )
-            filter_bam.assert_called_once()
-            self.assertEqual(filter_bam.call_args.args[0], bam_path)
-            minimap2_map.assert_not_called()
-            derive_last_clusters_from_pre.assert_not_called()
-            self.assertEqual(write_outputs.call_count, 2)
-            self.assertEqual(
-                write_outputs.call_args_list[0].args[0], {"PRE_MARKER": ["PRE_MARKER"]}
-            )
-            self.assertEqual(
-                write_outputs.call_args_list[1].args[0], {"LAST_MARKER": ["LAST_MARKER"]}
-            )
-            with open(
-                os.path.join(out_dir, "Append_merged.bed"), encoding="utf-8"
-            ) as merged_handle, open(all_bed_path, encoding="utf-8") as input_handle:
-                self.assertEqual(merged_handle.read(), input_handle.read())
-
-    def test_append_rejects_missing_bam_before_filtering(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            query_cdna_path = os.path.join(temp_dir, "query.cdna.fasta")
-            query_gdna_path = os.path.join(temp_dir, "query.gdna.fasta")
-            refer_cdna_path = os.path.join(temp_dir, "reference.cdna.fasta")
-            refer_gdna_path = os.path.join(temp_dir, "reference.gdna.fasta")
-            all_bed_path = os.path.join(temp_dir, "combined.bed")
-            bam_path = os.path.join(temp_dir, "missing.bam")
-            for fasta_path in (
-                query_cdna_path,
-                query_gdna_path,
-                refer_cdna_path,
-                refer_gdna_path,
-            ):
-                with open(fasta_path, "w", encoding="utf-8"):
-                    pass
-            with open(all_bed_path, "w", encoding="utf-8") as handle:
-                handle.write("A1\t1\t100\tRefA.g1\t0\t+\n")
-
-            with mock.patch.object(pipeline, "filter_bam") as filter_bam:
-                with self.assertRaises(FileNotFoundError) as error:
-                    pipeline.unit_append(
-                        query_cdna_path=query_cdna_path,
-                        query_gdna_path=query_gdna_path,
-                        all_bed_path=all_bed_path,
-                        refer_cdna_path=refer_cdna_path,
-                        refer_gdna_path=refer_gdna_path,
-                        bam_path=bam_path,
-                        variety_name=["JM22"],
-                        threads=1,
-                        out_dir=os.path.join(temp_dir, "out"),
-                    )
-
-            self.assertIn(bam_path, str(error.exception))
-            filter_bam.assert_not_called()

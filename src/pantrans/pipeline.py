@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import logging
+from itertools import chain
 from typing import Iterable
 from .common_func import (
     get_fasta_len,
@@ -16,9 +17,34 @@ from .common_func import (
     extract_fasta_records_by_exact_names_indexed,
     concat_fasta_files,
 )
-from .align_filter import minimap2_map, minimap2_map_rescue, filter_bam
+from .align_filter import (
+    minimap2_map,
+    minimap2_map_rescue,
+    filter_bam,
+    bam_alignment_provenance,
+    merge_bams_with_full_header,
+    alignment_provenance,
+    transcript_to_gene_id,
+    iter_filtered_bam_gene_edges,
+    FILTER_LOGIC_ID,
+    validate_resume_bam,
+)
 from .construct_di_graph import assign_sccs, di_graph_from_pair, get_conn_comp
-from .transcript_processor import transcript_dedup, get_cdna_from_gtf, get_subset_bed, sort_gtf_by_gene_id
+from .graph_package import (
+    iter_graph_edges,
+    load_graph_package,
+    merge_history_and_query_bed,
+    validate_edge_provenance,
+    write_graph_package,
+)
+from .transcript_processor import (
+    get_cdna_from_gtf,
+    get_subset_bed,
+    load_gtf_transcript_models,
+    rename_gtf_ids,
+    sort_gtf_by_gene_id,
+    transcript_dedup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +80,46 @@ def _collect_input_genes(bed_dic, variety_li):
     }
 
 
-def _derive_clusters_from_alignment(
+def _validate_variety_gene_ids(gene_ids, variety_li, label):
+    """Require every gene ID to match one unambiguous variety prefix."""
+    variety_li = _normalize_variety_names(variety_li)
+    if len(set(variety_li)) != len(variety_li):
+        raise ValueError(f"{label} contains duplicate variety names")
+    ambiguous_pairs = sorted(
+        {
+            tuple(sorted((left, right)))
+            for index, left in enumerate(variety_li)
+            for right in variety_li[index + 1 :]
+            if left.startswith(right) or right.startswith(left)
+        }
+    )
+    if ambiguous_pairs:
+        formatted = ", ".join(f"{left}/{right}" for left, right in ambiguous_pairs)
+        raise ValueError(f"{label} has ambiguous variety prefixes: {formatted}")
+
+    matched_varieties = set()
+    invalid_genes = []
+    for gene_id in gene_ids:
+        matches = [variety for variety in variety_li if gene_id.startswith(variety)]
+        if len(matches) != 1:
+            invalid_genes.append(gene_id)
+        else:
+            matched_varieties.add(matches[0])
+    if invalid_genes:
+        preview = ", ".join(sorted(invalid_genes)[:10])
+        suffix = "..." if len(invalid_genes) > 10 else ""
+        raise ValueError(
+            f"{label} gene ID does not match exactly one variety prefix: "
+            f"{preview}{suffix}"
+        )
+    missing_varieties = sorted(set(variety_li) - matched_varieties)
+    if missing_varieties:
+        raise ValueError(
+            f"{label} has no genes for varieties: {', '.join(missing_varieties)}"
+        )
+
+
+def _derive_graph_and_clusters(
     aligned_gene_li,
     gene_len_dic,
     bed_dic,
@@ -94,6 +159,29 @@ def _derive_clusters_from_alignment(
         )
         pre_clusters.extend(missing_pre)
         last_clusters.extend(missing_last)
+    return graph, pre_clusters, last_clusters
+
+
+def _derive_clusters_from_alignment(
+    aligned_gene_li,
+    gene_len_dic,
+    bed_dic,
+    variety_li,
+    refer_name,
+    eligible_gene_set,
+    main_chroms=None,
+    refer_prefixes=None,
+):
+    _, pre_clusters, last_clusters = _derive_graph_and_clusters(
+        aligned_gene_li=aligned_gene_li,
+        gene_len_dic=gene_len_dic,
+        bed_dic=bed_dic,
+        variety_li=variety_li,
+        refer_name=refer_name,
+        eligible_gene_set=eligible_gene_set,
+        main_chroms=main_chroms,
+        refer_prefixes=refer_prefixes,
+    )
     return pre_clusters, last_clusters
 
 
@@ -175,6 +263,41 @@ def _validate_append_gene_set(sequence_gene_set, bed_dic):
     return sequence_gene_set
 
 
+def _validate_history_transcriptome(
+    history_gtf_path, history_cdna_path, history_gene_ids
+):
+    """Validate an unrenamed final GTF/cDNA pair against the graph package."""
+    models = load_gtf_transcript_models(history_gtf_path)
+    gtf_transcript_ids = set(models["transcript_gene"])
+    cdna_transcript_ids = set(get_fasta_len(history_cdna_path))
+    if gtf_transcript_ids != cdna_transcript_ids:
+        missing_from_cdna = sorted(gtf_transcript_ids - cdna_transcript_ids)
+        missing_from_gtf = sorted(cdna_transcript_ids - gtf_transcript_ids)
+        raise ValueError(
+            "Historical GTF and cDNA transcript IDs do not match; "
+            f"missing from cDNA: {missing_from_cdna[:10]}; "
+            f"missing from GTF: {missing_from_gtf[:10]}"
+        )
+
+    history_gtf_genes = set(models["transcript_gene"].values())
+    renamed_genes = sorted(
+        gene_id for gene_id in history_gtf_genes if gene_id.startswith("Pan")
+    )
+    if renamed_genes:
+        raise ValueError(
+            "Historical GTF contains renamed Pan gene IDs; use the previous "
+            f"unrenamed GTF: {', '.join(renamed_genes[:10])}"
+        )
+
+    genes_outside_graph = sorted(history_gtf_genes - set(history_gene_ids))
+    if genes_outside_graph:
+        raise ValueError(
+            "Historical GTF contains genes absent from historical graph: "
+            + ", ".join(genes_outside_graph[:10])
+        )
+    return models
+
+
 def _normalize_chrom_label(chrom):
     chrom = chrom.strip()
     if len(chrom) == 2 and chrom[0] in "ABD" and chrom[1].isdigit():
@@ -235,13 +358,18 @@ def _build_gene_rename_map(cluster_dic, bed_path, variety_li, prefix, refer_pref
 
 def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_path,
                            trans_len_dic, gene_len_dic, gene_strand_dic, rename_map, out_dir, prefix, label,
-                           all_cdna_path=None, threads=8, enable_rescue=False, pre_gtf_path=None):
+                           all_cdna_path=None, threads=8, enable_rescue=False, pre_gtf_path=None,
+                           seed_gtf_path=None):
     label_suffix = f"_{label}" if label else ""
     gtf_path = os.path.join(out_dir, f"{prefix}{label_suffix}.gtf")
     gdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_gdna.refer.fasta")
     cdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_cdna.refer.fasta")
     bed_path = os.path.join(out_dir, f"{prefix}{label_suffix}.refer.bed")
     refer_gene_li = list(cluster_dic.keys())
+    unrenamed_gtf_path = os.path.join(
+        out_dir, f"{prefix}{label_suffix}_unrenamed.gtf"
+    )
+    transcript_gtf_path = unrenamed_gtf_path if rename_map else gtf_path
 
     transcript_dedup(
         filter_bam_path,
@@ -249,17 +377,18 @@ def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_
         trans_len_dic=trans_len_dic,
         gene_len_dic=gene_len_dic,
         gene_strand_dic=gene_strand_dic,
-        rename_map=rename_map,
-        gtf_path=gtf_path,
+        rename_map=None,
+        gtf_path=transcript_gtf_path,
+        seed_gtf_path=seed_gtf_path,
     )
     if enable_rescue:
         _rescue_missing_cluster_genes(
             cluster_dic=cluster_dic,
-            gtf_path=gtf_path,
+            gtf_path=transcript_gtf_path,
             all_cdna_path=all_cdna_path,
             all_gdna_path=all_gdna_path,
             all_bed_path=all_bed_path,
-            rename_map=rename_map,
+            rename_map=None,
             out_dir=out_dir,
             prefix=prefix,
             label=label,
@@ -267,8 +396,14 @@ def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_
             pre_gtf_path=pre_gtf_path,
         )
     if rename_map:
+        rename_gtf_ids(unrenamed_gtf_path, gtf_path, rename_map)
         sort_gtf_by_gene_id(gtf_path)
     extract_fasta_subset_by_names(all_gdna_path, refer_gene_li, gdna_path)
+    if rename_map:
+        unrenamed_cdna_path = os.path.join(
+            out_dir, f"{prefix}{label_suffix}_unrenamed_cdna.refer.fasta"
+        )
+        get_cdna_from_gtf(all_gdna_path, unrenamed_gtf_path, unrenamed_cdna_path)
     get_cdna_from_gtf(all_gdna_path, gtf_path, cdna_path)
     get_subset_bed(refer_gene_li, all_bed_path, bed_path)
     return gtf_path, cdna_path, gdna_path, bed_path
@@ -520,7 +655,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     # Step 2: Build graph and derive final gene clusters
     logger.info("Start graph building and gene assignment")
     input_gene_set = _collect_input_genes(bed_dic, variety_li)
-    pre_clusters, last_clusters = _derive_clusters_from_alignment(
+    graph, pre_clusters, last_clusters = _derive_graph_and_clusters(
         aligned_gene_li=aligned_gene_li,
         gene_len_dic=gene_len_dic,
         bed_dic=bed_dic,
@@ -529,6 +664,30 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         eligible_gene_set=input_gene_set,
         main_chroms=main_chroms,
     )
+    graph_package_path = os.path.join(out_dir, f"{prefix}.graph.json")
+    construct_provenance = (
+        bam_alignment_provenance(align_bam_path)
+        if bam_path
+        else alignment_provenance()
+    )
+    construct_provenance["scope"] = "construct_all_to_all"
+    construct_provenance["filter_thresholds_assumed"] = False
+    construct_provenance["filter_thresholds_source"] = "current_construct_filter"
+    construct_provenance["filter_logic_id"] = FILTER_LOGIC_ID
+    write_graph_package(
+        manifest_path=graph_package_path,
+        edge_iter=graph.edges(),
+        gene_len_dic=gene_len_dic,
+        bed_path=all_bed_path,
+        filtered_bam_path=filter_bam_path,
+        cdna_paths=[all_cdna_path],
+        gdna_paths=[all_gdna_path],
+        variety_names=variety_li,
+        reference_name=refer_name,
+        main_chroms=main_chroms,
+        provenance={"edge_generations": [construct_provenance]},
+    )
+    logger.info("Wrote reusable graph package: %s", graph_package_path)
     last_cluster_dic = cluster2dic(last_clusters)
     pre_cluster_dic = cluster2dic(pre_clusters)
     last_rename_map = _build_gene_rename_map(last_cluster_dic, all_bed_path, variety_li, "Pan")
@@ -582,63 +741,213 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     logger.info(f"{variety_li[-1]} construct end")
     return new_cdna_path, new_gdna_path, new_bed_path
 
-def unit_append(query_cdna_path, query_gdna_path, all_bed_path, refer_cdna_path, refer_gdna_path,
-                bam_path, variety_name, threads, out_dir, prefix="Append"):
+def unit_append(
+    history_cdna_path,
+    history_gtf_path,
+    query_cdna_path,
+    query_gdna_path,
+    all_bed_path,
+    history_graph_path,
+    variety_name,
+    threads,
+    out_dir,
+    prefix="Append",
+    query_to_all_bam=None,
+    history_to_query_bam=None,
+):
+    """Append new varieties by reusing the complete historical graph."""
     os.makedirs(out_dir, exist_ok=True)
     new_variety_li = _normalize_variety_names(variety_name)
+    history_package = load_graph_package(history_graph_path)
+    current_provenance = alignment_provenance()
+    history_generations = validate_edge_provenance(
+        history_package.get("provenance"), current_provenance
+    )
+    history_variety_li = list(history_package["variety_names"])
+    duplicate_varieties = sorted(set(history_variety_li) & set(new_variety_li))
+    if duplicate_varieties:
+        raise ValueError(
+            "Append variety names already exist in the historical graph: "
+            + ", ".join(duplicate_varieties)
+        )
+    variety_li = history_variety_li + new_variety_li
 
     merged_cdna_path = os.path.join(out_dir, f"{prefix}_merged.cdna.fasta")
     merged_gdna_path = os.path.join(out_dir, f"{prefix}_merged.gdna.fasta")
     merged_bed_path = os.path.join(out_dir, f"{prefix}_merged.bed")
-    merged_bam_path = os.path.join(out_dir, f"{prefix}_merged_cdna_align_gdna.bam")
+    query_to_all_bam_path = query_to_all_bam or os.path.join(
+        out_dir, f"{prefix}_query_to_all.bam"
+    )
+    query_to_all_filtered_bam_path = os.path.join(
+        out_dir, f"{prefix}_query_to_all.filtered.bam"
+    )
+    history_to_query_bam_path = history_to_query_bam or os.path.join(
+        out_dir, f"{prefix}_history_to_query.bam"
+    )
+    history_to_query_filtered_bam_path = os.path.join(
+        out_dir, f"{prefix}_history_to_query.filtered.bam"
+    )
     filtered_bam_path = os.path.join(out_dir, f"{prefix}_merged_cdna_align_gdna.filtered.bam")
 
-    if bam_path and not os.path.isfile(bam_path):
-        raise FileNotFoundError(f"Append BAM file does not exist: {bam_path}")
+    query_gene_len_dic = get_fasta_len(query_gdna_path)
+    query_gene_set = set(query_gene_len_dic)
+    query_trans_len_dic = get_fasta_len(query_cdna_path)
+    query_transcript_ids = set(query_trans_len_dic)
+    query_cdna_gene_set = {
+        transcript_to_gene_id(transcript_id)
+        for transcript_id in query_transcript_ids
+    }
+    history_gene_set = set(history_package["history_gene_ids"])
+    _validate_history_transcriptome(
+        history_gtf_path, history_cdna_path, history_gene_set
+    )
+    _validate_variety_gene_ids(
+        history_gene_set, history_variety_li, "historical graph"
+    )
+    _validate_variety_gene_ids(query_gene_set, new_variety_li, "query gDNA")
+    _validate_variety_gene_ids(query_cdna_gene_set, new_variety_li, "query cDNA")
+    unexpected_query_cdna = sorted(query_cdna_gene_set - query_gene_set)
+    if unexpected_query_cdna:
+        preview = ", ".join(unexpected_query_cdna[:10])
+        suffix = "..." if len(unexpected_query_cdna) > 10 else ""
+        raise ValueError(
+            "Query cDNA contains genes absent from query gDNA: "
+            f"{preview}{suffix}"
+        )
+    _validate_variety_gene_ids(
+        history_gene_set | query_gene_set, variety_li, "merged append input"
+    )
+    duplicate_genes = sorted(history_gene_set & query_gene_set)
+    if duplicate_genes:
+        preview = ", ".join(duplicate_genes[:10])
+        suffix = "..." if len(duplicate_genes) > 10 else ""
+        raise ValueError(f"Append gene IDs already exist in history: {preview}{suffix}")
 
-    logger.info("Merge query and reference cDNA into %s", merged_cdna_path)
-    concat_fasta_files([refer_cdna_path, query_cdna_path], merged_cdna_path)
-    logger.info("Merge query and reference gDNA into %s", merged_gdna_path)
-    concat_fasta_files([refer_gdna_path, query_gdna_path], merged_gdna_path)
-    logger.info("Copy combined representative-and-query BED into %s", merged_bed_path)
-    shutil.copyfile(all_bed_path, merged_bed_path)
-
-    align_bam_path = bam_path or merged_bam_path
-    if bam_path:
-        logger.info("Skip append alignment; using existing BAM: %s", bam_path)
-    else:
-        logger.info("Start append alignment: merged cDNA vs merged gDNA")
-        minimap2_map(merged_cdna_path, merged_gdna_path, threads, align_bam_path)
-        logger.info("Finish append alignment")
-
+    logger.info("Prepare full historical and merged sequence inputs")
+    concat_fasta_files([history_cdna_path, query_cdna_path], merged_cdna_path)
+    concat_fasta_files(history_package["gdna_paths"] + [query_gdna_path], merged_gdna_path)
+    merge_history_and_query_bed(
+        history_package["bed_path"],
+        all_bed_path,
+        history_gene_ids=history_gene_set,
+        query_gene_ids=query_gene_set,
+        output_path=merged_bed_path,
+    )
     bed_dic, gene_strand_dic = get_bed(merged_bed_path)
     trans_len_dic = get_fasta_len(merged_cdna_path)
-    merged_gdna_gene_set = set(get_fasta_len(merged_gdna_path))
-    eligible_gene_set = _validate_append_gene_set(merged_gdna_gene_set, bed_dic)
-    logger.info("Start append BAM filtering")
-    aligned_gene_li, gene_len_dic = filter_bam(align_bam_path, filtered_bam_path, bed_dic)
-    logger.info("Finish append BAM filtering, generated %s", filtered_bam_path)
+    eligible_gene_set = history_gene_set | query_gene_set
+    _validate_append_gene_set(eligible_gene_set, bed_dic)
+    cdna_gene_set = {
+        transcript_to_gene_id(transcript_id) for transcript_id in trans_len_dic
+    }
+    unexpected_cdna_genes = sorted(cdna_gene_set - eligible_gene_set)
+    if unexpected_cdna_genes:
+        preview = ", ".join(unexpected_cdna_genes[:10])
+        suffix = "..." if len(unexpected_cdna_genes) > 10 else ""
+        raise ValueError(
+            "Merged cDNA contains genes absent from merged gDNA/BED: "
+            f"{preview}{suffix}"
+        )
+    history_transcript_ids = set(get_fasta_len(history_cdna_path))
+    expected_merged_gene_lengths = dict(history_package["gene_len_dic"])
+    expected_merged_gene_lengths.update(query_gene_len_dic)
+    for resume_bam_path, expected_queries, expected_targets, label in (
+        (
+            query_to_all_bam,
+            query_transcript_ids,
+            expected_merged_gene_lengths,
+            "query-to-all BAM",
+        ),
+        (
+            history_to_query_bam,
+            history_transcript_ids,
+            query_gene_len_dic,
+            "history-to-query BAM",
+        ),
+    ):
+        if resume_bam_path:
+            resume_provenance = validate_resume_bam(
+                resume_bam_path, expected_queries, expected_targets, label
+            )
+            # The raw BAM's aligner provenance is checked here. Filtering is
+            # performed below by this PanTrans run, so its logic is known.
+            resume_provenance["filter_thresholds"] = current_provenance[
+                "filter_thresholds"
+            ]
+            resume_provenance["filter_thresholds_assumed"] = False
+            resume_provenance["filter_logic_id"] = FILTER_LOGIC_ID
+            validate_edge_provenance(
+                {"edge_generations": [resume_provenance]}, current_provenance
+            )
 
-    refer_variety_li = _infer_reference_variety_names_from_bed(merged_bed_path, new_variety_li)
-    variety_li = new_variety_li[:]
-    refer_name = refer_variety_li[0]
+    logger.info("Align new cDNA against complete historical-plus-new gDNA")
+    if query_to_all_bam:
+        logger.info("Reuse query-to-all BAM: %s", query_to_all_bam_path)
+    else:
+        minimap2_map(query_cdna_path, merged_gdna_path, threads, query_to_all_bam_path)
+    _, gene_len_dic = filter_bam(
+        query_to_all_bam_path,
+        query_to_all_filtered_bam_path,
+        bed_dic,
+        collect_edges=False,
+    )
 
-    logger.info("Start append graph building and gene assignment")
-    pre_clusters, last_clusters = _derive_clusters_from_alignment(
-        aligned_gene_li=aligned_gene_li,
+    logger.info("Align complete historical cDNA against new gDNA")
+    if history_to_query_bam:
+        logger.info("Reuse history-to-query BAM: %s", history_to_query_bam_path)
+    else:
+        minimap2_map(history_cdna_path, query_gdna_path, threads, history_to_query_bam_path)
+    _, _ = filter_bam(
+        history_to_query_bam_path,
+        history_to_query_filtered_bam_path,
+        bed_dic,
+        collect_edges=False,
+    )
+
+    merge_bams_with_full_header(
+        [
+            history_package["filtered_bam_path"],
+            query_to_all_filtered_bam_path,
+            history_to_query_filtered_bam_path,
+        ],
+        query_to_all_bam_path,
+        filtered_bam_path,
+    )
+
+    logger.info("Merge historical and cross-alignment edges, then assign clusters")
+    graph, pre_clusters, last_clusters = _derive_graph_and_clusters(
+            aligned_gene_li=chain(
+                iter_graph_edges(history_package["edges_path"]),
+                iter_filtered_bam_gene_edges(query_to_all_filtered_bam_path),
+                iter_filtered_bam_gene_edges(history_to_query_filtered_bam_path),
+            ),
         gene_len_dic=gene_len_dic,
         bed_dic=bed_dic,
         variety_li=variety_li,
-        refer_name=refer_name,
+        refer_name=history_package["reference_name"],
         eligible_gene_set=eligible_gene_set,
-        main_chroms=None,
-        refer_prefixes=refer_variety_li,
+        main_chroms=history_package.get("main_chroms"),
     )
 
     pre_cluster_dic = cluster2dic(pre_clusters)
     last_cluster_dic = cluster2dic(last_clusters)
-    last_rename_map = _build_gene_rename_map(
-        last_cluster_dic, merged_bed_path, variety_li, "Pan", refer_prefixes=refer_variety_li
+    last_rename_map = _build_gene_rename_map(last_cluster_dic, merged_bed_path, variety_li, "Pan")
+
+    graph_package_path = os.path.join(out_dir, f"{prefix}.graph.json")
+    append_provenance = dict(current_provenance)
+    append_provenance["scope"] = "append_cross_alignments"
+    write_graph_package(
+        manifest_path=graph_package_path,
+        edge_iter=graph.edges(),
+        gene_len_dic=gene_len_dic,
+        bed_path=merged_bed_path,
+        filtered_bam_path=filtered_bam_path,
+        cdna_paths=[history_cdna_path, query_cdna_path],
+        gdna_paths=history_package["gdna_paths"] + [query_gdna_path],
+        variety_names=variety_li,
+        reference_name=history_package["reference_name"],
+        main_chroms=history_package.get("main_chroms"),
+        provenance={"edge_generations": history_generations + [append_provenance]},
     )
 
     pre_cluster_path = os.path.join(out_dir, f"{prefix}_pre.tmp.cluster")
@@ -686,6 +995,13 @@ def unit_append(query_cdna_path, query_gdna_path, all_bed_path, refer_cdna_path,
         threads=threads,
         enable_rescue=True,
         pre_gtf_path=pre_gtf_path,
+        seed_gtf_path=history_gtf_path,
     )
 
-    return merged_cdna_path, merged_gdna_path, merged_bed_path, align_bam_path, filtered_bam_path
+    return (
+        merged_cdna_path,
+        merged_gdna_path,
+        merged_bed_path,
+        graph_package_path,
+        filtered_bam_path,
+    )
