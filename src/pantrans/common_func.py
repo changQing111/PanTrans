@@ -1,9 +1,41 @@
+import hashlib
 import os
 import pysam
 import subprocess
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def sequence_identity(sequence):
+    """Return a stable identity for one biological sequence."""
+    normalized = sequence.upper()
+    return {
+        "length": len(normalized),
+        "sha256": hashlib.sha256(normalized.encode("ascii")).hexdigest(),
+    }
+
+
+def get_fasta_sequence_identities(fasta_path):
+    """Return sequence identities keyed by the first token of each FASTA header."""
+    identities = {}
+    record_id = None
+    seq_parts = []
+    with open(fasta_path, "rt", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if record_id is not None:
+                    identities[record_id] = sequence_identity("".join(seq_parts))
+                record_id = line[1:].split()[0]
+                seq_parts = []
+            else:
+                seq_parts.append(line)
+    if record_id is not None:
+        identities[record_id] = sequence_identity("".join(seq_parts))
+    return identities
 
 
 def get_fasta_len(fasta_path):

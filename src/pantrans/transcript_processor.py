@@ -551,7 +551,8 @@ def get_cdna_from_gtf(fasta_path, gtf_path, out_path):
     Returns:
         int: 写出的转录本条目数量
     """
-    genome = Bio.SeqIO.to_dict(Bio.SeqIO.parse(fasta_path, "fasta"))
+    with open(fasta_path, "rt", encoding="utf-8") as fasta_handle:
+        genome = Bio.SeqIO.to_dict(Bio.SeqIO.parse(fasta_handle, "fasta"))
 
     from collections import defaultdict
     transcripts = defaultdict(list)  # transcript_id -> list[(chrom,start,end,strand)]

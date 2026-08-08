@@ -3,7 +3,11 @@ import shutil
 import os
 import shlex
 import tempfile
+from collections.abc import Mapping
+
 import pysam
+
+from .common_func import sequence_identity
 from .version import __version__
 
 MINIMAP2_OPTIONS = "-ax splice:hq -uf -I 16G --secondary=yes -N 100"
@@ -167,14 +171,23 @@ def bam_alignment_provenance(bam_path):
 
 
 def validate_resume_bam(bam_path, expected_query_ids, expected_target_lengths, label):
-    """Validate a raw cross-alignment BAM before reusing it."""
+    """Validate a raw cross-alignment BAM before reusing it.
+
+    ``expected_query_ids`` may be an ID collection or an ID-to-sequence-identity
+    mapping when the current cDNA sequences must be matched exactly.
+    """
     provenance = bam_alignment_provenance(bam_path)
     if provenance["pantrans_filtered_bam"]:
         raise ValueError(f"{label} is already PanTrans-filtered; provide the raw BAM")
     actual_target_lengths = get_bam_target_lengths(bam_path)
     if actual_target_lengths != dict(expected_target_lengths):
         raise ValueError(f"{label} target header does not match expected gDNA")
-    expected_query_ids = set(expected_query_ids)
+    expected_query_identities = None
+    if isinstance(expected_query_ids, Mapping):
+        expected_query_identities = dict(expected_query_ids)
+        expected_query_ids = set(expected_query_identities)
+    else:
+        expected_query_ids = set(expected_query_ids)
     actual_query_ids = set()
     with pysam.AlignmentFile(bam_path, "rb") as bam_file:
         for read in bam_file.fetch(until_eof=True):
@@ -186,6 +199,18 @@ def validate_resume_bam(bam_path, expected_query_ids, expected_target_lengths, l
                     f"{label} contains query transcript outside expected cDNA: "
                     f"{read.query_name}"
                 )
+            if expected_query_identities is not None:
+                query_sequence = read.get_forward_sequence()
+                actual_identity = (
+                    sequence_identity(query_sequence)
+                    if query_sequence is not None
+                    else None
+                )
+                if actual_identity != expected_query_identities[read.query_name]:
+                    raise ValueError(
+                        f"{label} query sequence does not match expected cDNA: "
+                        f"{read.query_name}"
+                    )
     missing_query_ids = expected_query_ids - actual_query_ids
     if missing_query_ids:
         missing = ", ".join(sorted(missing_query_ids))

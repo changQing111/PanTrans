@@ -206,7 +206,7 @@ pantrans append \
 
 如需继续追加下一个品种，请将本次 append 生成的图包，以及对应的 `_unrenamed.gtf` 和 `_unrenamed_cdna.refer.fasta` 作为下一次运行的历史输入。
 
-如果 append 在任意交叉比对完成后失败，可以使用对应的 `--query-to-all-bam` 和/或 `--history-to-query-bam` 路径重新运行。BAM 必须包含 `minimap2` 的 `@PG` 记录，且版本和生成图边时使用的参数一致；PanTrans 会使用当前阈值重新过滤复用的 BAM。
+如果 append 在任意交叉比对完成后失败，可以使用对应的 `--query-to-all-bam` 和/或 `--history-to-query-bam` 路径重新运行。BAM 必须包含 `minimap2` 的 `@PG` 记录，且版本和生成图边时使用的参数一致。PanTrans 还会将 BAM 中的主查询 ID 和序列摘要与当前 cDNA FASTA 对照，然后使用当前阈值重新过滤复用的 BAM。
 
 ## 输出说明
 

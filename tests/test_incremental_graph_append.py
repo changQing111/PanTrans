@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import tempfile
 import unittest
@@ -382,6 +383,67 @@ class BamMergeTest(unittest.TestCase):
             validate_resume_bam(
                 bam_path,
                 {"Query.g1.1", "Query.g2.1"},
+                {"Ref.g1": 100},
+                "query-to-all BAM",
+            )
+
+    def test_resume_bam_rejects_same_id_with_different_query_sequence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bam_path = os.path.join(temp_dir, "stale-sequence.bam")
+            self._write_alignment(bam_path, self._header(["Ref.g1"]), "Ref.g1")
+
+            with self.assertRaisesRegex(ValueError, "query sequence does not match"):
+                validate_resume_bam(
+                    bam_path,
+                    {
+                        "Query.g1.1": {
+                            "length": 20,
+                            "sha256": hashlib.sha256(b"C" * 20).hexdigest(),
+                        }
+                    },
+                    {"Ref.g1": 100},
+                    "query-to-all BAM",
+                )
+
+    def test_resume_bam_accepts_matching_reverse_and_unmapped_sequences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bam_path = os.path.join(temp_dir, "reverse-and-unmapped.bam")
+            header = self._header(["Ref.g1"])
+            with pysam.AlignmentFile(bam_path, "wb", header=header) as output:
+                reverse_read = pysam.AlignedSegment()
+                reverse_read.query_name = "Query.g1.1"
+                reverse_read.query_sequence = "GACT"
+                reverse_read.flag = 16
+                reverse_read.reference_id = 0
+                reverse_read.reference_start = 0
+                reverse_read.mapping_quality = 60
+                reverse_read.cigar = [(0, 4)]
+                reverse_read.query_qualities = pysam.qualitystring_to_array("IIII")
+                output.write(reverse_read)
+
+                unmapped_read = pysam.AlignedSegment()
+                unmapped_read.query_name = "Query.g2.1"
+                unmapped_read.query_sequence = "AACG"
+                unmapped_read.flag = 4
+                unmapped_read.reference_id = -1
+                unmapped_read.reference_start = -1
+                unmapped_read.mapping_quality = 0
+                unmapped_read.cigar = []
+                unmapped_read.query_qualities = pysam.qualitystring_to_array("IIII")
+                output.write(unmapped_read)
+
+            validate_resume_bam(
+                bam_path,
+                {
+                    "Query.g1.1": {
+                        "length": 4,
+                        "sha256": hashlib.sha256(b"AGTC").hexdigest(),
+                    },
+                    "Query.g2.1": {
+                        "length": 4,
+                        "sha256": hashlib.sha256(b"AACG").hexdigest(),
+                    },
+                },
                 {"Ref.g1": 100},
                 "query-to-all BAM",
             )

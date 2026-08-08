@@ -6,6 +6,7 @@ from itertools import chain
 from typing import Iterable
 from .common_func import (
     get_fasta_len,
+    get_fasta_sequence_identities,
     get_bed,
     get_bed_rows,
     cluster2dic,
@@ -849,18 +850,28 @@ def unit_append(
             f"{preview}{suffix}"
         )
     history_transcript_ids = set(get_fasta_len(history_cdna_path))
+    query_resume_expectations = (
+        get_fasta_sequence_identities(query_cdna_path)
+        if query_to_all_bam
+        else query_transcript_ids
+    )
+    history_resume_expectations = (
+        get_fasta_sequence_identities(history_cdna_path)
+        if history_to_query_bam
+        else history_transcript_ids
+    )
     expected_merged_gene_lengths = dict(history_package["gene_len_dic"])
     expected_merged_gene_lengths.update(query_gene_len_dic)
     for resume_bam_path, expected_queries, expected_targets, label in (
         (
             query_to_all_bam,
-            query_transcript_ids,
+            query_resume_expectations,
             expected_merged_gene_lengths,
             "query-to-all BAM",
         ),
         (
             history_to_query_bam,
-            history_transcript_ids,
+            history_resume_expectations,
             query_gene_len_dic,
             "history-to-query BAM",
         ),

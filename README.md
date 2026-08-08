@@ -230,7 +230,9 @@ run's historical inputs.
 If an append job fails after either cross-alignment finishes, rerun it with the
 corresponding `--query-to-all-bam` and/or `--history-to-query-bam` path. The BAM
 must contain the minimap2 `@PG` record with the same edge-generating options and
-version; PanTrans re-filters reused BAMs with the current thresholds.
+version. PanTrans also verifies the primary query IDs and sequence identities
+against the current cDNA FASTA before re-filtering the reused BAM with the
+current thresholds.
 
 ## Output interpretation
 
