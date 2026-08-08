@@ -93,34 +93,80 @@ def get_conn_comp(G):
         key=lambda component: component
     )
 
+
+def _attach_missing_cluster_members(derived_clusters, genes_to_attach, preferred_gene):
+    if not genes_to_attach:
+        return derived_clusters
+    if not derived_clusters:
+        return [genes_to_attach[:]]
+
+    target_index = 0
+    for index, cluster in enumerate(derived_clusters):
+        if preferred_gene in cluster:
+            target_index = index
+            break
+
+    seen = set(derived_clusters[target_index])
+    for gene in genes_to_attach:
+        if gene not in seen:
+            derived_clusters[target_index].append(gene)
+            seen.add(gene)
+    return derived_clusters
+
+
+def _cluster_gene_set(clusters):
+    return {gene for cluster in clusters for gene in cluster}
+
+
+def derive_last_clusters_from_pre(
+    pre_clusters, G, gene_len_dic, bed_dic, variety_li, refer_name,
+    main_chroms=None, refer_prefixes=None,
+):
+    last_clusters = []
+    for cluster in pre_clusters:
+        cluster = list(cluster)
+        annotated_cluster = [gene for gene in cluster if gene in bed_dic]
+        if not annotated_cluster:
+            last_clusters.append(cluster)
+            continue
+        if len(annotated_cluster) == 1:
+            derived_clusters = [annotated_cluster]
+        else:
+            assigned_cluster = assign_gene_by_chrom(
+                variety_li, annotated_cluster, bed_dic, main_chroms=main_chroms, refer_prefixes=refer_prefixes
+            )
+            derived_clusters = []
+            for ac in assigned_cluster:
+                if len(ac) == 1:
+                    derived_clusters.append(ac)
+                else:
+                    derived_clusters.extend(
+                        unit_recursion(G, ac, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
+                    )
+
+        derived_gene_set = _cluster_gene_set(derived_clusters)
+        omitted_genes = [gene for gene in cluster if gene not in derived_gene_set]
+        last_clusters.extend(
+            _attach_missing_cluster_members(derived_clusters, omitted_genes, cluster[0])
+        )
+    return last_clusters
+
 def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=None, refer_prefixes=None):
     """
     Split strongly connected components into final clusters by recursively
     resolving graph structure and assigning genes by chromosome.
     """
     pre_cluster = []
-    last_clusters = []
     for scc in sccs:
         li = list(scc)
         if len(li) == 1:
             pre_cluster.append(li)
-            last_clusters.append(li)
         else:
             clusters = unit_recursion(G, li, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
             pre_cluster.extend(clusters)
-            for cluster in clusters:
-                if len(cluster) == 1:
-                    last_clusters.append(cluster)
-                else:
-                    assigned_cluster = assign_gene_by_chrom(
-                        variety_li, cluster, bed_dic, main_chroms=main_chroms, refer_prefixes=refer_prefixes
-                    )
-                    for ac in assigned_cluster:
-                        if len(ac) == 1:
-                            last_clusters.append(ac)
-                        else:
-                            last_clusters.extend(
-                                unit_recursion(G, ac, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
-                            )
+    last_clusters = derive_last_clusters_from_pre(
+        pre_cluster, G, gene_len_dic, bed_dic, variety_li, refer_name,
+        main_chroms=main_chroms, refer_prefixes=refer_prefixes
+    )
     return pre_cluster, last_clusters
 
