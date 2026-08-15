@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import logging
 from itertools import chain
 from typing import Iterable
@@ -48,6 +49,8 @@ from .transcript_processor import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BAM_MERGE_BATCH_SIZE = 128
 
 
 def _normalize_variety_names(variety_input):
@@ -429,7 +432,39 @@ def _merge_bam_files(bam_paths, merged_bam_path):
     if len(bam_paths) == 1:
         shutil.copyfile(bam_paths[0], merged_bam_path)
         return True
-    subprocess.run(["samtools", "merge", "-f", merged_bam_path] + bam_paths, check=True)
+
+    destination_directory = os.path.dirname(os.path.abspath(merged_bam_path))
+    output_stem = os.path.splitext(os.path.basename(merged_bam_path))[0]
+    with tempfile.TemporaryDirectory(
+        dir=destination_directory,
+        prefix=f"{output_stem}.merge-",
+    ) as merge_directory:
+        current_paths = list(bam_paths)
+        round_index = 0
+        while len(current_paths) > 1:
+            next_paths = []
+            for group_index, group_start in enumerate(
+                range(0, len(current_paths), _BAM_MERGE_BATCH_SIZE)
+            ):
+                group = current_paths[
+                    group_start : group_start + _BAM_MERGE_BATCH_SIZE
+                ]
+                intermediate_path = os.path.join(
+                    merge_directory,
+                    f"round-{round_index:03d}-group-{group_index:05d}.bam",
+                )
+                if len(group) == 1:
+                    shutil.copyfile(group[0], intermediate_path)
+                else:
+                    subprocess.run(
+                        ["samtools", "merge", "-f", intermediate_path] + group,
+                        check=True,
+                    )
+                next_paths.append(intermediate_path)
+            current_paths = next_paths
+            round_index += 1
+
+        os.replace(current_paths[0], merged_bam_path)
     return True
 
 def _parse_gtf_attrs(attrs):
