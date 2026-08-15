@@ -1,5 +1,6 @@
 import os
 import inspect
+import subprocess
 import sys
 import tempfile
 import types
@@ -69,7 +70,10 @@ def import_main_with_pipeline_stub():
         if module_name == "pantrans" or module_name.startswith("pantrans.")
     }
     try:
-        with mock.patch.dict(sys.modules, {"pantrans.pipeline": pipeline}):
+        with mock.patch.dict(
+            sys.modules,
+            {"pantrans.pipeline": pipeline, **dependency_stubs()},
+        ):
             from pantrans import main as imported_main
     finally:
         for module_name in tuple(sys.modules):
@@ -83,6 +87,109 @@ def import_main_with_pipeline_stub():
 
 
 pantrans_main = import_main_with_pipeline_stub()
+
+
+class MergeBamFilesTest(unittest.TestCase):
+    def test_empty_input_returns_false_without_creating_destination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = os.path.join(temp_dir, "merged.bam")
+
+            with mock.patch.object(pipeline.subprocess, "run") as run_mock:
+                result = pipeline._merge_bam_files([], destination)
+
+            self.assertFalse(result)
+            self.assertFalse(os.path.exists(destination))
+            run_mock.assert_not_called()
+
+    def test_single_input_is_copied_verbatim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = os.path.join(temp_dir, "input.bam")
+            destination = os.path.join(temp_dir, "merged.bam")
+            expected_contents = b"BAM\x01\x00test contents"
+            with open(source, "wb") as handle:
+                handle.write(expected_contents)
+
+            with mock.patch.object(pipeline.subprocess, "run") as run_mock:
+                result = pipeline._merge_bam_files([source], destination)
+
+            self.assertTrue(result)
+            with open(destination, "rb") as handle:
+                self.assertEqual(handle.read(), expected_contents)
+            run_mock.assert_not_called()
+
+    def test_129_inputs_are_merged_in_two_bounded_rounds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bam_paths = []
+            for index in range(129):
+                bam_path = os.path.join(temp_dir, f"input-{index:03d}.bam")
+                with open(bam_path, "wb") as handle:
+                    handle.write(str(index).encode("ascii"))
+                bam_paths.append(bam_path)
+
+            destination = os.path.join(temp_dir, "merged.bam")
+
+            def create_merge_output(command, check):
+                self.assertTrue(check)
+                with open(command[3], "wb") as handle:
+                    handle.write(b"merged")
+
+            with mock.patch.object(
+                pipeline.subprocess, "run", side_effect=create_merge_output
+            ) as run_mock, mock.patch.object(
+                pipeline.shutil,
+                "copyfile",
+                wraps=pipeline.shutil.copyfile,
+            ) as copy_mock:
+                result = pipeline._merge_bam_files(bam_paths, destination)
+
+            commands = [call.args[0] for call in run_mock.call_args_list]
+            copy_mock.assert_called_once()
+            copied_source, copied_singleton = copy_mock.call_args.args
+            self.assertTrue(result)
+            self.assertTrue(os.path.exists(destination))
+            self.assertEqual(len(commands), 2)
+            self.assertTrue(all(len(command) - 4 <= 128 for command in commands))
+            self.assertEqual(len(commands[0]) - 4, 128)
+            self.assertEqual(len(commands[1]) - 4, 2)
+            self.assertEqual(copied_source, bam_paths[-1])
+            self.assertCountEqual(
+                commands[1][4:],
+                [commands[0][3], copied_singleton],
+            )
+            self.assertNotEqual(commands[1][3], destination)
+            self.assertFalse(
+                any(name.startswith("merged.merge-") for name in os.listdir(temp_dir))
+            )
+
+    def test_called_process_error_propagates_and_cleans_temporary_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bam_paths = []
+            for index in range(2):
+                bam_path = os.path.join(temp_dir, f"input-{index}.bam")
+                with open(bam_path, "wb") as handle:
+                    handle.write(str(index).encode("ascii"))
+                bam_paths.append(bam_path)
+            destination = os.path.join(temp_dir, "merged.bam")
+            requested_outputs = []
+
+            def fail_merge(command, check):
+                self.assertTrue(check)
+                requested_outputs.append(command[3])
+                raise subprocess.CalledProcessError(1, command)
+
+            with mock.patch.object(
+                pipeline.subprocess, "run", side_effect=fail_merge
+            ), self.assertRaises(subprocess.CalledProcessError):
+                pipeline._merge_bam_files(bam_paths, destination)
+
+            self.assertEqual(len(requested_outputs), 1)
+            merge_directory = os.path.dirname(requested_outputs[0])
+            self.assertNotEqual(merge_directory, temp_dir)
+            self.assertTrue(
+                os.path.basename(merge_directory).startswith("merged.merge-")
+            )
+            self.assertFalse(os.path.exists(merge_directory))
+            self.assertFalse(os.path.exists(destination))
 
 
 class AppendCliContractTest(unittest.TestCase):
