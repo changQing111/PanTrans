@@ -47,8 +47,15 @@ def sort_gene(gene_li, bed_dic, main_chrom_order):
         )
         return sorted_li
 
-def get_variety_n(query, var_li, refer_prefixes=None):
+def get_variety_n(query, var_li, refer_prefixes=None, gene_variety_dic=None):
     """严格匹配品种名（前缀匹配），可将参考集前缀折叠为 Refer。"""
+    if gene_variety_dic is not None:
+        if query not in gene_variety_dic:
+            return get_variety_n(query, var_li, refer_prefixes=refer_prefixes)
+        mapped = gene_variety_dic[query]
+        if refer_prefixes and mapped in refer_prefixes:
+            return "Refer"
+        return mapped if mapped in var_li else None
     refer_prefixes = tuple(refer_prefixes or [])
     if refer_prefixes and query.startswith(refer_prefixes):
         return "Refer"
@@ -103,7 +110,7 @@ def assign_variety_genes(groups, genes, bed_dic, main_chrom_order):
             groups[chosen_index]["main_chrom"] = bed_dic[gene][0]
         available_indexes.remove(chosen_index)
 
-def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refer_prefixes=None):
+def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refer_prefixes=None, gene_variety_dic=None):
     """按“品种覆盖优先、主染色体优先、contig 灵活补位”策略输出簇列表.
     
     参数:
@@ -119,7 +126,12 @@ def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refe
     variety_gene_dic = {v: [] for v in normalized_variety_li}
     unknown_genes = []
     for gene in cluster_li:
-        variety = get_variety_n(gene, normalized_variety_li, refer_prefixes=refer_prefixes)
+        variety = get_variety_n(
+            gene,
+            normalized_variety_li,
+            refer_prefixes=refer_prefixes,
+            gene_variety_dic=gene_variety_dic,
+        )
         if variety is None:
             unknown_genes.append(gene)
             continue

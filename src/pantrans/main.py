@@ -28,12 +28,6 @@ def read_parameters(argv=None):
         "construct", help="Construct Pan-Genome and Pan-Transcriptome"
     )
     construct_parser.add_argument(
-        "-n",
-        "--name",
-        required=True,
-        help="variety names (file path, comma-separated list, or space-separated list)",
-    )
-    construct_parser.add_argument(
         "-c", "--cdna", required=True, default=None, help="all cdna sequences path"
     )
     construct_parser.add_argument(
@@ -53,6 +47,11 @@ def read_parameters(argv=None):
         help="text file containing main chromosome names, one per line",
     )
     construct_parser.add_argument(
+        "--rescue",
+        action="store_true",
+        help="rescue cluster representatives missing from the generated GTF",
+    )
+    construct_parser.add_argument(
         "-r", "--reference", required=True, help="reference name"
     )
     construct_parser.add_argument(
@@ -69,12 +68,6 @@ def read_parameters(argv=None):
     append_parser = subparsers.add_parser(
         "append",
         help="Append New Variety to Existing Pan-Genome and Pan-Transcriptome",
-    )
-    append_parser.add_argument(
-        "-n",
-        "--name",
-        required=True,
-        help="new variety names (file path, comma-separated list, or space-separated list)",
     )
     append_parser.add_argument(
         "-c",
@@ -108,6 +101,11 @@ def read_parameters(argv=None):
         "--history-graph",
         required=True,
         help="graph package emitted by the historical construct run",
+    )
+    append_parser.add_argument(
+        "--rescue",
+        action="store_true",
+        help="rescue cluster representatives missing from the generated GTF",
     )
     append_parser.add_argument(
         "-p", "--prefix", default="Append", help="output prefix"
@@ -145,7 +143,7 @@ def main():
             all_bed_path=args.bed, 
             bam_path=args.bam,
             main_chrom_path=args.main_chroms,
-            variety_li=args.name, 
+            rescue=args.rescue,
             threads=args.threads, 
             out_dir=args.output, 
             prefix=args.prefix, 
@@ -161,7 +159,7 @@ def main():
             query_gdna_path=args.gdna,
             all_bed_path=args.bed,
             history_graph_path=args.history_graph,
-            variety_name=args.name,
+            rescue=args.rescue,
             threads=args.threads,
             out_dir=args.output,
             prefix=args.prefix,

@@ -9,6 +9,7 @@ from .common_func import (
     get_fasta_len,
     get_fasta_sequence_identities,
     get_bed,
+    get_bed_varieties,
     get_bed_rows,
     cluster2dic,
     extract_fasta_subset_by_names,
@@ -74,8 +75,34 @@ def _normalize_variety_names(variety_input):
     return variety_li
 
 
-def _collect_input_genes(bed_dic, variety_li):
+def _load_bed_variety_mapping(bed_path, required=False):
+    """Load BED column-5 variety labels."""
+    try:
+        return get_bed_varieties(bed_path, required=required)
+    except FileNotFoundError:
+        if required:
+            raise
+        return {}
+
+
+def _varieties_from_gene_mapping(gene_ids, gene_variety_dic):
+    """Return first-seen variety labels for a set of genes in BED order."""
+    wanted = set(gene_ids)
+    result = []
+    for gene_id, variety in gene_variety_dic.items():
+        if gene_id in wanted and variety not in result:
+            result.append(variety)
+    return result
+
+
+def _collect_input_genes(bed_dic, variety_li, gene_variety_dic=None):
     """Collect genes that belong to the requested varieties."""
+    if gene_variety_dic:
+        allowed = set(variety_li)
+        return {
+            gene_id for gene_id in bed_dic
+            if gene_variety_dic.get(gene_id) in allowed
+        }
     variety_prefixes = tuple(variety_li)
     return {
         gene_id
@@ -84,19 +111,21 @@ def _collect_input_genes(bed_dic, variety_li):
     }
 
 
-def _validate_variety_gene_ids(gene_ids, variety_li, label):
+def _validate_variety_gene_ids(gene_ids, variety_li, label, gene_variety_dic=None):
     """Require every gene ID to match one unambiguous variety prefix."""
     variety_li = _normalize_variety_names(variety_li)
     if len(set(variety_li)) != len(variety_li):
         raise ValueError(f"{label} contains duplicate variety names")
-    ambiguous_pairs = sorted(
-        {
-            tuple(sorted((left, right)))
-            for index, left in enumerate(variety_li)
-            for right in variety_li[index + 1 :]
-            if left.startswith(right) or right.startswith(left)
-        }
-    )
+    ambiguous_pairs = []
+    if gene_variety_dic is None:
+        ambiguous_pairs = sorted(
+            {
+                tuple(sorted((left, right)))
+                for index, left in enumerate(variety_li)
+                for right in variety_li[index + 1 :]
+                if left.startswith(right) or right.startswith(left)
+            }
+        )
     if ambiguous_pairs:
         formatted = ", ".join(f"{left}/{right}" for left, right in ambiguous_pairs)
         raise ValueError(f"{label} has ambiguous variety prefixes: {formatted}")
@@ -104,7 +133,14 @@ def _validate_variety_gene_ids(gene_ids, variety_li, label):
     matched_varieties = set()
     invalid_genes = []
     for gene_id in gene_ids:
-        matches = [variety for variety in variety_li if gene_id.startswith(variety)]
+        if gene_variety_dic is not None:
+            if gene_id in gene_variety_dic:
+                mapped_variety = gene_variety_dic[gene_id]
+                matches = [mapped_variety] if mapped_variety in variety_li else []
+            else:
+                matches = [variety for variety in variety_li if gene_id.startswith(variety)]
+        else:
+            matches = [variety for variety in variety_li if gene_id.startswith(variety)]
         if len(matches) != 1:
             invalid_genes.append(gene_id)
         else:
@@ -132,6 +168,7 @@ def _derive_graph_and_clusters(
     eligible_gene_set,
     main_chroms=None,
     refer_prefixes=None,
+    gene_variety_dic=None,
 ):
     graph = di_graph_from_pair(aligned_gene_li)
     sccs = get_conn_comp(graph)
@@ -150,6 +187,7 @@ def _derive_graph_and_clusters(
         refer_name,
         main_chroms=main_chroms,
         refer_prefixes=refer_prefixes,
+        gene_variety_dic=gene_variety_dic,
     )
     pre_clustered = {gene for cluster in pre_clusters for gene in cluster}
     last_clustered = {gene for cluster in last_clusters for gene in cluster}
@@ -175,6 +213,7 @@ def _derive_clusters_from_alignment(
     eligible_gene_set,
     main_chroms=None,
     refer_prefixes=None,
+    gene_variety_dic=None,
 ):
     _, pre_clusters, last_clusters = _derive_graph_and_clusters(
         aligned_gene_li=aligned_gene_li,
@@ -185,6 +224,7 @@ def _derive_clusters_from_alignment(
         eligible_gene_set=eligible_gene_set,
         main_chroms=main_chroms,
         refer_prefixes=refer_prefixes,
+        gene_variety_dic=gene_variety_dic,
     )
     return pre_clusters, last_clusters
 
@@ -199,18 +239,10 @@ def _load_main_chroms(main_chrom_path):
     return main_chroms
 
 def _infer_variety_names_from_bed(bed_path):
-    variety_li = []
-    with open(bed_path, "rt", encoding="utf-8") as handle:
-        for line in handle:
-            fields = line.strip().split("\t")
-            if len(fields) < 4:
-                continue
-            gene_id = fields[3]
-            variety = gene_id.split(".", 1)[0]
-            if variety and variety not in variety_li:
-                variety_li.append(variety)
+    variety_dic = get_bed_varieties(bed_path, required=True)
+    variety_li = list(dict.fromkeys(variety_dic.values()))
     if not variety_li:
-        raise ValueError(f"No valid variety names could be inferred from {bed_path}.")
+        raise ValueError(f"No variety names found in BED column 5: {bed_path}.")
     return variety_li
 
 
@@ -226,15 +258,16 @@ def _infer_reference_variety_names_from_bed(bed_path, query_variety_li):
     query_variety_li = _normalize_variety_names(query_variety_li)
     query_prefixes = tuple(query_variety_li)
     reference_variety_li = []
+    bed_varieties = get_bed_varieties(bed_path)
     with open(bed_path, "rt", encoding="utf-8") as handle:
         for line in handle:
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 4 or not fields[3]:
                 continue
             gene_id = fields[3]
-            if gene_id.startswith(query_prefixes):
+            if bed_varieties.get(gene_id) in query_variety_li or gene_id.startswith(query_prefixes):
                 continue
-            variety = gene_id.split(".", 1)[0]
+            variety = bed_varieties.get(gene_id) or gene_id.split(".", 1)[0]
             if variety and variety not in reference_variety_li:
                 reference_variety_li.append(variety)
     if not reference_variety_li:
@@ -310,7 +343,14 @@ def _normalize_chrom_label(chrom):
         return chrom
     return "Ctg"
 
-def _build_gene_rename_map(cluster_dic, bed_path, variety_li, prefix, refer_prefixes=None):
+def _build_gene_rename_map(
+    cluster_dic,
+    bed_path,
+    variety_li,
+    prefix,
+    refer_prefixes=None,
+    gene_variety_dic=None,
+):
     bed_rows = get_bed_rows(bed_path)
     bed_chrom_by_gene = {}
     bed_order_by_gene = {}
@@ -327,7 +367,11 @@ def _build_gene_rename_map(cluster_dic, bed_path, variety_li, prefix, refer_pref
         for variety in normalized_variety_li:
             if variety == "Refer":
                 continue
-            if gene_id.startswith(variety):
+            has_mapping = gene_variety_dic is not None and gene_id in gene_variety_dic
+            mapped_variety = (gene_variety_dic or {}).get(gene_id)
+            if mapped_variety == variety or (
+                not has_mapping and gene_id.startswith(variety)
+            ):
                 chrom_variety_rows[chrom_label][variety].append(gene_id)
                 break
 
@@ -666,8 +710,22 @@ def _rescue_missing_cluster_genes(cluster_dic, gtf_path, all_cdna_path, all_gdna
     return len(rescued_gene_set) + len(rescued_from_pre)
 
 
-def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_chrom_path, variety_li, threads, out_dir, prefix, refer_name):
-    variety_li = _normalize_variety_names(variety_li)
+def unit_construct(
+    all_cdna_path,
+    all_gdna_path,
+    all_bed_path,
+    bam_path,
+    main_chrom_path,
+    threads,
+    out_dir,
+    prefix,
+    refer_name,
+    rescue=False,
+):
+    bed_variety_dic = _load_bed_variety_mapping(all_bed_path, required=True)
+    variety_li = list(dict.fromkeys(bed_variety_dic.values()))
+    if not variety_li:
+        raise ValueError(f"No variety names found in BED column 5: {all_bed_path}.")
     main_chroms = _load_main_chroms(main_chrom_path)
     if not refer_name:
         refer_name = variety_li[0]
@@ -690,7 +748,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     logger.info("Finish BAM filtering, generated %s", filter_bam_path)
     # Step 2: Build graph and derive final gene clusters
     logger.info("Start graph building and gene assignment")
-    input_gene_set = _collect_input_genes(bed_dic, variety_li)
+    input_gene_set = _collect_input_genes(bed_dic, variety_li, bed_variety_dic or None)
     graph, pre_clusters, last_clusters = _derive_graph_and_clusters(
         aligned_gene_li=aligned_gene_li,
         gene_len_dic=gene_len_dic,
@@ -699,6 +757,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         refer_name=refer_name,
         eligible_gene_set=input_gene_set,
         main_chroms=main_chroms,
+        gene_variety_dic=bed_variety_dic or None,
     )
     graph_package_path = os.path.join(out_dir, f"{prefix}.graph.json")
     construct_provenance = (
@@ -726,7 +785,10 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
     logger.info("Wrote reusable graph package: %s", graph_package_path)
     last_cluster_dic = cluster2dic(last_clusters)
     pre_cluster_dic = cluster2dic(pre_clusters)
-    last_rename_map = _build_gene_rename_map(last_cluster_dic, all_bed_path, variety_li, "Pan")
+    last_rename_map = _build_gene_rename_map(
+        last_cluster_dic, all_bed_path, variety_li, "Pan",
+        gene_variety_dic=bed_variety_dic or None,
+    )
     # write pre last clusters into file
     pre_cluster_path = os.path.join(out_dir, f"{prefix}_pre.tmp.cluster")
     with open(pre_cluster_path, "w") as f:
@@ -753,7 +815,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         "pre",
         all_cdna_path=all_cdna_path,
         threads=threads,
-        enable_rescue=True,
+        enable_rescue=rescue,
     )
 
     logger.info("Produce last-cluster transcript and sequence outputs")
@@ -771,7 +833,7 @@ def unit_construct(all_cdna_path, all_gdna_path, all_bed_path, bam_path, main_ch
         "",
         all_cdna_path=all_cdna_path,
         threads=threads,
-        enable_rescue=True,
+        enable_rescue=rescue,
         pre_gtf_path=pre_gtf_path,
     )
     logger.info(f"{variety_li[-1]} construct end")
@@ -784,22 +846,34 @@ def unit_append(
     query_gdna_path,
     all_bed_path,
     history_graph_path,
-    variety_name,
     threads,
     out_dir,
     prefix="Append",
     query_to_all_bam=None,
     history_to_query_bam=None,
+    rescue=False,
 ):
     """Append new varieties by reusing the complete historical graph."""
     os.makedirs(out_dir, exist_ok=True)
-    new_variety_li = _normalize_variety_names(variety_name)
+    append_bed_variety_dic = _load_bed_variety_mapping(all_bed_path, required=True)
     history_package = load_graph_package(history_graph_path)
     current_provenance = alignment_provenance()
     history_generations = validate_edge_provenance(
         history_package.get("provenance"), current_provenance
     )
     history_variety_li = list(history_package["variety_names"])
+    history_bed_variety_dic = _load_bed_variety_mapping(
+        history_package["bed_path"], required=True
+    )
+    gene_variety_dic = dict(history_bed_variety_dic)
+    gene_variety_dic.update(append_bed_variety_dic)
+    query_gene_len_dic = get_fasta_len(query_gdna_path)
+    query_gene_set = set(query_gene_len_dic)
+    new_variety_li = _varieties_from_gene_mapping(
+        query_gene_set, append_bed_variety_dic
+    )
+    if not new_variety_li:
+        raise ValueError("Append BED column 5 contains no variety names for query genes")
     duplicate_varieties = sorted(set(history_variety_li) & set(new_variety_li))
     if duplicate_varieties:
         raise ValueError(
@@ -825,8 +899,6 @@ def unit_append(
     )
     filtered_bam_path = os.path.join(out_dir, f"{prefix}_merged_cdna_align_gdna.filtered.bam")
 
-    query_gene_len_dic = get_fasta_len(query_gdna_path)
-    query_gene_set = set(query_gene_len_dic)
     query_trans_len_dic = get_fasta_len(query_cdna_path)
     query_transcript_ids = set(query_trans_len_dic)
     query_cdna_gene_set = {
@@ -838,10 +910,23 @@ def unit_append(
         history_gtf_path, history_cdna_path, history_gene_set
     )
     _validate_variety_gene_ids(
-        history_gene_set, history_variety_li, "historical graph"
+        history_gene_set,
+        history_variety_li,
+        "historical graph",
+        gene_variety_dic=gene_variety_dic or None,
     )
-    _validate_variety_gene_ids(query_gene_set, new_variety_li, "query gDNA")
-    _validate_variety_gene_ids(query_cdna_gene_set, new_variety_li, "query cDNA")
+    _validate_variety_gene_ids(
+        query_gene_set,
+        new_variety_li,
+        "query gDNA",
+        gene_variety_dic=gene_variety_dic or None,
+    )
+    _validate_variety_gene_ids(
+        query_cdna_gene_set,
+        new_variety_li,
+        "query cDNA",
+        gene_variety_dic=gene_variety_dic or None,
+    )
     unexpected_query_cdna = sorted(query_cdna_gene_set - query_gene_set)
     if unexpected_query_cdna:
         preview = ", ".join(unexpected_query_cdna[:10])
@@ -851,7 +936,10 @@ def unit_append(
             f"{preview}{suffix}"
         )
     _validate_variety_gene_ids(
-        history_gene_set | query_gene_set, variety_li, "merged append input"
+        history_gene_set | query_gene_set,
+        variety_li,
+        "merged append input",
+        gene_variety_dic=gene_variety_dic or None,
     )
     duplicate_genes = sorted(history_gene_set & query_gene_set)
     if duplicate_genes:
@@ -973,11 +1061,18 @@ def unit_append(
         refer_name=history_package["reference_name"],
         eligible_gene_set=eligible_gene_set,
         main_chroms=history_package.get("main_chroms"),
+        gene_variety_dic=gene_variety_dic or None,
     )
 
     pre_cluster_dic = cluster2dic(pre_clusters)
     last_cluster_dic = cluster2dic(last_clusters)
-    last_rename_map = _build_gene_rename_map(last_cluster_dic, merged_bed_path, variety_li, "Pan")
+    last_rename_map = _build_gene_rename_map(
+        last_cluster_dic,
+        merged_bed_path,
+        variety_li,
+        "Pan",
+        gene_variety_dic=gene_variety_dic or None,
+    )
 
     graph_package_path = os.path.join(out_dir, f"{prefix}.graph.json")
     append_provenance = dict(current_provenance)
@@ -1021,7 +1116,7 @@ def unit_append(
         "pre",
         all_cdna_path=merged_cdna_path,
         threads=threads,
-        enable_rescue=True,
+        enable_rescue=rescue,
     )
 
     logger.info("Produce append last-cluster transcript and sequence outputs")
@@ -1039,7 +1134,7 @@ def unit_append(
         "",
         all_cdna_path=merged_cdna_path,
         threads=threads,
-        enable_rescue=True,
+        enable_rescue=rescue,
         pre_gtf_path=pre_gtf_path,
         seed_gtf_path=history_gtf_path,
     )

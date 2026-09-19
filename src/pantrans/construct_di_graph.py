@@ -8,7 +8,9 @@ def calculate_in_degree_in_scc(graph, scc):
     
     return in_degrees
 
-def find_max_in_degree_nodes(in_degrees, gene_len_dic, refer_name, refer_prefixes=None):
+def find_max_in_degree_nodes(
+    in_degrees, gene_len_dic, refer_name, refer_prefixes=None, gene_variety_dic=None
+):
     """找到入度最大的节点，若有多个则选长度最长的，若仍有多个则优先参考集基因。"""
     max_degree = max(in_degrees.values())
     max_nodes = sorted(node for node, degree in in_degrees.items() if degree == max_degree)
@@ -20,14 +22,24 @@ def find_max_in_degree_nodes(in_degrees, gene_len_dic, refer_name, refer_prefixe
     if refer_prefixes:
         refer_nodes = [node for node in max_nodes if node.startswith(refer_prefixes)]
     elif refer_name:
-        refer_nodes = [node for node in max_nodes if refer_name in node]
+        if gene_variety_dic is not None:
+            refer_nodes = [
+                node for node in max_nodes if gene_variety_dic.get(node) == refer_name
+            ]
+            has_labeled_candidates = any(node in gene_variety_dic for node in max_nodes)
+        else:
+            has_labeled_candidates = False
+        if not refer_nodes and not has_labeled_candidates:
+            refer_nodes = [node for node in max_nodes if refer_name in node]
     return sorted(refer_nodes or max_nodes)[0]
 
 def is_bidirectionally_connected(graph, nodeA, nodeB):
     """判断两个节点是否有双向连接"""
     return graph.has_edge(nodeA, nodeB) and graph.has_edge(nodeB, nodeA)
 
-def unit_recursion(G, node_li, gene_len_dic, refer_name, refer_prefixes=None):
+def unit_recursion(
+    G, node_li, gene_len_dic, refer_name, refer_prefixes=None, gene_variety_dic=None
+):
     """分组：挑选代表节点并输出与其双向连接的簇（迭代实现）
 
     Args:
@@ -61,7 +73,13 @@ def unit_recursion(G, node_li, gene_len_dic, refer_name, refer_prefixes=None):
             results.extend([[node] for node in sorted(pending)])
             break
 
-        max_node = find_max_in_degree_nodes(node_degree_dic, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
+        max_node = find_max_in_degree_nodes(
+            node_degree_dic,
+            gene_len_dic,
+            refer_name,
+            refer_prefixes=refer_prefixes,
+            gene_variety_dic=gene_variety_dic,
+        )
         if max_node not in pending:
             # 理论上不应发生，作为兜底：将剩余节点全部作为单节点簇输出
             results.extend([[node] for node in sorted(pending)])
@@ -120,7 +138,7 @@ def _cluster_gene_set(clusters):
 
 def derive_last_clusters_from_pre(
     pre_clusters, G, gene_len_dic, bed_dic, variety_li, refer_name,
-    main_chroms=None, refer_prefixes=None,
+    main_chroms=None, refer_prefixes=None, gene_variety_dic=None,
 ):
     last_clusters = []
     for cluster in pre_clusters:
@@ -133,7 +151,12 @@ def derive_last_clusters_from_pre(
             derived_clusters = [annotated_cluster]
         else:
             assigned_cluster = assign_gene_by_chrom(
-                variety_li, annotated_cluster, bed_dic, main_chroms=main_chroms, refer_prefixes=refer_prefixes
+                variety_li,
+                annotated_cluster,
+                bed_dic,
+                main_chroms=main_chroms,
+                refer_prefixes=refer_prefixes,
+                gene_variety_dic=gene_variety_dic,
             )
             derived_clusters = []
             for ac in assigned_cluster:
@@ -141,7 +164,14 @@ def derive_last_clusters_from_pre(
                     derived_clusters.append(ac)
                 else:
                     derived_clusters.extend(
-                        unit_recursion(G, ac, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
+                        unit_recursion(
+                            G,
+                            ac,
+                            gene_len_dic,
+                            refer_name,
+                            refer_prefixes=refer_prefixes,
+                            gene_variety_dic=gene_variety_dic,
+                        )
                     )
 
         derived_gene_set = _cluster_gene_set(derived_clusters)
@@ -151,7 +181,7 @@ def derive_last_clusters_from_pre(
         )
     return last_clusters
 
-def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=None, refer_prefixes=None):
+def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=None, refer_prefixes=None, gene_variety_dic=None):
     """
     Split strongly connected components into final clusters by recursively
     resolving graph structure and assigning genes by chromosome.
@@ -162,11 +192,20 @@ def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chr
         if len(li) == 1:
             pre_cluster.append(li)
         else:
-            clusters = unit_recursion(G, li, gene_len_dic, refer_name, refer_prefixes=refer_prefixes)
+            clusters = unit_recursion(
+                G,
+                li,
+                gene_len_dic,
+                refer_name,
+                refer_prefixes=refer_prefixes,
+                gene_variety_dic=gene_variety_dic,
+            )
             pre_cluster.extend(clusters)
     last_clusters = derive_last_clusters_from_pre(
         pre_cluster, G, gene_len_dic, bed_dic, variety_li, refer_name,
-        main_chroms=main_chroms, refer_prefixes=refer_prefixes
+        main_chroms=main_chroms,
+        refer_prefixes=refer_prefixes,
+        gene_variety_dic=gene_variety_dic,
     )
     return pre_cluster, last_clusters
 

@@ -50,9 +50,12 @@ PanTrans 使用以下类型的输入：
 - `cdna` FASTA：转录本序列
 - `gdna` FASTA：作为比对目标的基因组基因序列
 - `bed` 文件：基因坐标和链方向
-- 品种名称：可以是文本文件、逗号分隔字符串或空格分隔字符串
+- BED 第 5 列：每个基因对应的品种名
+- 品种名称：从 BED 第 5 列自动推断
 
-BED 文件必须在第 4 列提供基因 ID，在第 1 列提供染色体或 contig 名称。
+BED 文件必须在第 4 列提供基因 ID、第 5 列提供品种名、第 1 列提供染色体或 contig 名称；第 6 列可提供链方向，省略时按 `.` 处理。
+
+`construct` 和 `append` 直接以 BED 第 5 列的标签定义每个基因的品种，品种列表也从该列自动生成，不再接受单独的品种名参数。
 
 ## Construct
 
@@ -62,7 +65,6 @@ BED 文件必须在第 4 列提供基因 ID，在第 1 列提供染色体或 con
 
 ```bash
 pantrans construct \
-  --name <variety_file_or_list> \
   --cdna <all_cdna.fasta> \
   --gdna <all_gdna.fasta> \
   --bed <all.bed> \
@@ -76,12 +78,12 @@ pantrans construct \
 - `--bam`：使用已有的 cDNA-to-gDNA BAM，跳过 `minimap2` 比对
 - `--main-chroms`：包含主染色体名称的文本文件，每行一个名称
 - `--threads`：`minimap2` 使用的线程数
+- `--rescue`：显式启用对最终未生成 GTF 模型的簇代表基因进行恢复；默认关闭
 
 ### 示例
 
 ```bash
 pantrans construct \
-  --name test/tmp_variety.txt \
   --cdna test/tmp_cdna.fasta \
   --gdna test/tmp_gdna.fasta \
   --bed test/tmp.bed \
@@ -128,7 +130,6 @@ PYTHONPATH=src python scripts/export_graph_package.py \
   --cdna test/tmp_cdna.fasta \
   --gdna test/tmp_gdna.fasta \
   --bed test/tmp.bed \
-  --name test/tmp_variety.txt \
   --reference CS \
   --main-chroms test/tmp_chrom.txt \
   --coverage-min 0.80 \
@@ -150,7 +151,6 @@ BAM 必须是生成历史簇时使用的过滤 BAM。其参考序列名称必须
 
 ```bash
 pantrans append \
-  --name <new_variety_file_or_list> \
   --cdna <previous_unrenamed_final_cdna.fasta> \
   --history-gtf <previous_unrenamed_final.gtf> \
   --query-cdna <new_variety_cdna.fasta> \
@@ -169,13 +169,12 @@ pantrans append \
 
 历史 GTF 和 cDNA 必须包含完全一致的转录本 ID。GTF 中的基因 ID 必须是历史图包中存在的未重命名 ID；如果传入官方 `Pan...` GTF，程序会拒绝。`--bed` 是一个合并 BED，包含历史 `pre.tmp.cluster` 中每个簇的第一个基因，以及新品种的全部基因。图包提供完整的历史 gDNA、BED、过滤 BAM、图边、节点长度、品种顺序、参考品种和比对来源信息。
 
-为了支持断点续跑，`append` 还接受 `--query-to-all-bam` 和 `--history-to-query-bam`，用于复用已经完成的两类交叉比对 BAM。
+为了支持断点续跑，`append` 还接受 `--query-to-all-bam` 和 `--history-to-query-bam`，用于复用已经完成的两类交叉比对 BAM。只有显式指定 `--rescue` 才会启用缺失 GTF 模型的恢复，默认不执行恢复。
 
 ### 示例
 
 ```bash
 pantrans append \
-  --name JM22 \
   --cdna test/pantrans_construct_out/test_pantrans_unrenamed_cdna.refer.fasta \
   --history-gtf test/pantrans_construct_out/test_pantrans_unrenamed.gtf \
   --query-cdna test/JM22_cdna.fasta \

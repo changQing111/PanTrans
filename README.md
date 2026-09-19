@@ -51,9 +51,41 @@ PanTrans expects the following input types:
 - `cdna` FASTA: transcript sequences
 - `gdna` FASTA: genomic gene sequences used as alignment targets
 - `bed` file: gene coordinates and strands
-- variety names: either a text file, a comma-separated string, or a space-separated string
+- BED column 5: the variety name for each gene
+- variety names are inferred from BED column 5
 
-The BED file must include gene IDs in column 4 and chromosome or contig names in column 1.
+The BED file must include gene IDs in column 4, variety names in column 5, and chromosome or contig names in column 1. Column 6 may provide the strand (or is treated as `.` when omitted).
+
+The column-5 label, rather than a gene-ID prefix, defines the variety for every
+construct and append operation. Both commands derive their variety list from
+the BED and do not accept a separate variety-name argument.
+
+### Required BED format
+
+The BED file must be tab-delimited and contain at least five columns on every
+data row. Coordinates use the standard BED convention: 0-based, half-open
+intervals (`start` inclusive, `end` exclusive). Do not add a header row. Blank
+lines and lines beginning with `#` are ignored.
+
+| Column | Required value |
+| --- | --- |
+| 1 | Chromosome or contig name |
+| 2 | Integer start coordinate |
+| 3 | Integer end coordinate |
+| 4 | Unique gene ID, matching a gDNA FASTA record and the gene part of cDNA transcript IDs |
+| 5 | Non-empty variety name for that gene; do not use `0`, `.`, or an empty value |
+| 6 | Strand, `+` or `-`; optional, defaults to `.` when omitted |
+
+Example:
+
+```text
+A1	277424819	277434365	gene_0001	CS	+
+A1	154737879	154739482	gene_0002	JM22	-
+```
+
+For `construct`, the BED contains every input gene. For `append`, the combined
+BED contains the historical representative genes required by the graph package
+plus every query gene; column 5 must label both the historical and query rows.
 
 ## Construct
 
@@ -63,7 +95,6 @@ Use `construct` to build a new pan-genome and pan-transcriptome from multiple va
 
 ```bash
 pantrans construct \
-  --name <variety_file_or_list> \
   --cdna <all_cdna.fasta> \
   --gdna <all_gdna.fasta> \
   --bed <all.bed> \
@@ -77,12 +108,12 @@ pantrans construct \
 - `--bam`: use an existing cDNA-to-gDNA BAM file and skip the `minimap2` alignment step
 - `--main-chroms`: text file containing main chromosome names, one per line
 - `--threads`: number of threads for `minimap2`
+- `--rescue`: explicitly enable rescue of cluster representatives missing from the generated GTF; disabled by default
 
 ### Example
 
 ```bash
 pantrans construct \
-  --name test/tmp_variety.txt \
   --cdna test/tmp_cdna.fasta \
   --gdna test/tmp_gdna.fasta \
   --bed test/tmp.bed \
@@ -133,7 +164,6 @@ PYTHONPATH=src python scripts/export_graph_package.py \
   --cdna test/tmp_cdna.fasta \
   --gdna test/tmp_gdna.fasta \
   --bed test/tmp.bed \
-  --name test/tmp_variety.txt \
   --reference CS \
   --main-chroms test/tmp_chrom.txt \
   --coverage-min 0.80 \
@@ -159,7 +189,6 @@ Use `append` to reuse a historical construct graph and add only the new-to-histo
 
 ```bash
 pantrans append \
-  --name <new_variety_file_or_list> \
   --cdna <previous_unrenamed_final_cdna.fasta> \
   --history-gtf <previous_unrenamed_final.gtf> \
   --query-cdna <new_variety_cdna.fasta> \
@@ -186,12 +215,13 @@ provenance.
 
 For restartability, append also accepts `--query-to-all-bam` and
 `--history-to-query-bam` to reuse either completed cross-alignment BAM.
+Pass `--rescue` to enable rescue of cluster representatives missing from the
+generated GTF; rescue is disabled by default.
 
 ### Example
 
 ```bash
 pantrans append \
-  --name JM22 \
   --cdna test/pantrans_construct_out/test_pantrans_unrenamed_cdna.refer.fasta \
   --history-gtf test/pantrans_construct_out/test_pantrans_unrenamed.gtf \
   --query-cdna test/JM22_cdna.fasta \
