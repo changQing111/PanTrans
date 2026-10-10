@@ -107,7 +107,7 @@ pantrans construct \
 
 - `--bam`: use an existing cDNA-to-gDNA BAM file and skip the `minimap2` alignment step
 - `--main-chroms`: text file containing main chromosome names, one per line
-- `--threads`: number of threads for `minimap2`
+- `--threads`: thread budget shared by minimap2 and samtools
 - `--rescue`: explicitly enable rescue of cluster representatives missing from the generated GTF; disabled by default
 
 ### Example

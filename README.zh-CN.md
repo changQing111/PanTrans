@@ -77,7 +77,7 @@ pantrans construct \
 
 - `--bam`：使用已有的 cDNA-to-gDNA BAM，跳过 `minimap2` 比对
 - `--main-chroms`：包含主染色体名称的文本文件，每行一个名称
-- `--threads`：`minimap2` 使用的线程数
+- `--threads`：minimap2 与 samtools 共享的线程预算
 - `--rescue`：显式启用对最终未生成 GTF 模型的簇代表基因进行恢复；默认关闭
 
 ### 示例

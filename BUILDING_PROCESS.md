@@ -36,8 +36,12 @@ Gene IDs must be unique across historical and newly appended varieties. Variety 
 Unless a reusable raw BAM is supplied, PanTrans runs splice-aware minimap2 with:
 
 ```text
--ax splice:hq -uf -I 16G --secondary=yes -N 100
+-ax splice:hq -uf -I 2G -K 50M --secondary=yes -N 100 --split-prefix <task-temp-dir>/mm2
 ```
+
+Each alignment (including rescue) creates a unique temporary directory beside the output BAM for split-index files and the pending BAM, and removes it on completion or failure. Both process exit codes must succeed before the BAM replaces its destination. Reserve sufficient disk space in the output filesystem. Provenance normalizes the split prefix to `<temporary>/mm2`; older alignment options remain incompatible with append.
+
+`--threads` is shared: samtools receives `min(4, max(1, threads // 4))` threads including its main thread, and minimap2 receives the remainder (at least one). For example, `-t 8` uses minimap2 `-t 6` and samtools `-@ 1`; `-t 32` uses `-t 28` and `-@ 3`. A requested budget of one still needs one thread per process; tool I/O/helper threads are additional, so this is not an OS thread cap.
 
 The SAM stream is converted directly to BAM with `samtools view`. PanTrans then writes a separate filtered BAM using the following criteria:
 

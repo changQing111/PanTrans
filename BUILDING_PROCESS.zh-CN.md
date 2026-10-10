@@ -36,8 +36,12 @@ source_gene -> target_gene
 如果没有提供可复用的原始 BAM，PanTrans 使用以下参数运行剪接感知的 minimap2：
 
 ```text
--ax splice:hq -uf -I 16G --secondary=yes -N 100
+-ax splice:hq -uf -I 2G -K 50M --secondary=yes -N 100 --split-prefix <task-temp-dir>/mm2
 ```
+
+每次比对（包括 rescue）在输出 BAM 所在目录创建独占临时目录，存放分片合并文件和待完成的 BAM，结束或失败后清理。仅当两个进程均成功退出时才替换目标 BAM；输出文件系统需预留临时磁盘空间。provenance 将分片前缀规范化为 `<temporary>/mm2`；旧比对参数仍会被 append 判为不兼容。
+
+`--threads` 为共享预算：samtools 分配 `min(4, max(1, threads // 4))` 个线程（包含主线程），minimap2 使用剩余线程（至少一个）。例如 `-t 8` 对应 minimap2 `-t 6` 与 samtools `-@ 1`；`-t 32` 对应 `-t 28` 与 `-@ 3`。预算为 1 时管道仍需两个进程各一个线程；工具的 I/O/辅助线程额外计算，因此该预算不是操作系统线程数硬上限。
 
 SAM 流通过 `samtools view` 直接转换为 BAM。随后 PanTrans 根据以下标准生成单独的过滤 BAM：
 

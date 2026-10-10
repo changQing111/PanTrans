@@ -3,6 +3,7 @@ import shutil
 import os
 import shlex
 import tempfile
+import logging
 from collections.abc import Mapping
 
 import pysam
@@ -10,7 +11,9 @@ import pysam
 from .common_func import sequence_identity
 from .version import __version__
 
-MINIMAP2_OPTIONS = "-ax splice:hq -uf -I 16G --secondary=yes -N 100"
+MINIMAP2_OPTIONS = "-ax splice:hq -uf -I 2G -K 50M --secondary=yes -N 100"
+SPLIT_OPTIONS = " --split-prefix <temporary>/mm2"
+logger = logging.getLogger(__name__)
 FILTER_LOGIC_ID = "pantrans-filter-v1"
 FILTERED_BAM_MARKER = "pantrans-filtered=" + FILTER_LOGIC_ID
 
@@ -104,7 +107,7 @@ def alignment_provenance():
         "pantrans_version": __version__,
         "minimap2_path": minimap2_path,
         "minimap2_version": minimap2_version,
-        "minimap2_options": MINIMAP2_OPTIONS,
+        "minimap2_options": MINIMAP2_OPTIONS + SPLIT_OPTIONS,
         "filter_thresholds": {
             "coverage_min": COV_MIN,
             "identity_min": PID_MIN,
@@ -128,6 +131,14 @@ def _minimap2_options_from_command(command):
             index += 2
             continue
         if token.startswith("-t") and token[2:].isdigit():
+            index += 1
+            continue
+        if token == "--split-prefix":
+            option_tokens.extend(["--split-prefix", "<temporary>/mm2"])
+            index += 2
+            continue
+        if token.startswith("--split-prefix="):
+            option_tokens.extend(["--split-prefix", "<temporary>/mm2"])
             index += 1
             continue
         option_tokens.append(token)
@@ -218,18 +229,52 @@ def validate_resume_bam(bam_path, expected_query_ids, expected_target_lengths, l
     return provenance
 
 def minimap2_map(cdna_path, gdna_path, threads, bam_path):
-    # use minimap2 to align cdna to gdna and write an unsorted BAM
-    cmd = f"minimap2 {MINIMAP2_OPTIONS} -t {threads} {gdna_path} {cdna_path} | samtools view -@{threads} -hb - > {bam_path}"
-    subprocess.run(cmd, shell=True, check=True)
+    """Map through a checked pipe, publishing the BAM only after both tools exit."""
+    if threads < 1:
+        raise ValueError("threads must be at least 1")
+    # samtools -@ counts extra compression threads, excluding its main thread.
+    # A streaming pipe needs at least one execution thread in each process.
+    samtools_total = min(4, max(1, threads // 4))
+    mapping_threads = max(1, threads - samtools_total)
+    logger.info(
+        "Alignment threads: minimap2 -t %d; samtools -@ %d (plus main thread). "
+        "Tool I/O/helper threads may add overhead.",
+        mapping_threads, samtools_total - 1,
+    )
+    bam_path = os.path.abspath(bam_path)
+    os.makedirs(os.path.dirname(bam_path), exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".pantrans-align-", dir=os.path.dirname(bam_path)
+    ) as work_dir:
+        partial_bam = os.path.join(work_dir, "alignment.bam")
+        map_cmd = ["minimap2"] + shlex.split(MINIMAP2_OPTIONS) + [
+            "--split-prefix", os.path.join(work_dir, "mm2"),
+            "-t", str(mapping_threads), os.fspath(gdna_path), os.fspath(cdna_path),
+        ]
+        view_cmd = ["samtools", "view", "-@", str(samtools_total - 1), "-hb", "-"]
+        with open(partial_bam, "wb") as output:
+            mapper = subprocess.Popen(map_cmd, stdout=subprocess.PIPE)
+            converter = None
+            try:
+                converter = subprocess.Popen(view_cmd, stdin=mapper.stdout, stdout=output)
+                mapper.stdout.close()
+                view_status = converter.wait()
+                map_status = mapper.wait()
+                if map_status:
+                    raise subprocess.CalledProcessError(map_status, map_cmd)
+                if view_status:
+                    raise subprocess.CalledProcessError(view_status, view_cmd)
+            finally:
+                mapper.stdout.close()
+                for process in (converter, mapper):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait()
+        os.replace(partial_bam, bam_path)
 
 def minimap2_map_rescue(cdna_path, gdna_path, threads, bam_path):
-    """Run a lighter splice-aware minimap2 pass for rescue alignments."""
-    cmd = (
-        f"minimap2 -ax splice:hq -uf --secondary=yes -N 100 -t 1 "
-        f"{gdna_path} {cdna_path} | "
-        f"samtools view -@1 -hb - > {bam_path}"
-    )
-    subprocess.run(cmd, shell=True, check=True)
+    """Use the same bounded batches and thread allocation for rescue mappings."""
+    minimap2_map(cdna_path, gdna_path, threads, bam_path)
 
 def parse_cigar(cigartuples):
     """解析 CIGAR，返回 query 覆盖长度、对齐长度、软截断长度"""

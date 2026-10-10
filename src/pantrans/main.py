@@ -55,7 +55,7 @@ def read_parameters(argv=None):
         "-r", "--reference", required=True, help="reference name"
     )
     construct_parser.add_argument(
-        "-t", "--threads", type=int, default=8, help="number of threads for minimap2"
+        "-t", "--threads", type=int, default=8, help="thread budget shared by minimap2 and samtools (minimum pipeline: 2; helper threads extra)"
     )
     construct_parser.add_argument(
         "-p", "--prefix", default="Pan", required=True, help="output prefix"
@@ -111,7 +111,7 @@ def read_parameters(argv=None):
         "-p", "--prefix", default="Append", help="output prefix"
     )
     append_parser.add_argument(
-        "-t", "--threads", type=int, default=8, help="number of threads for minimap2"
+        "-t", "--threads", type=int, default=8, help="thread budget shared by minimap2 and samtools (minimum pipeline: 2; helper threads extra)"
     )
     append_parser.add_argument(
         "--query-to-all-bam",
