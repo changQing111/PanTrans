@@ -1,5 +1,5 @@
 import networkx as nx
-from .assign_cluster_gene import assign_gene_by_chrom
+from .assign_cluster_gene import MAIN_CHROMS, assign_gene_by_chrom
 
 def calculate_in_degree_in_scc(graph, scc):
     """计算SCC中节点的内部入度（仅来自SCC内部的边）"""
@@ -37,8 +37,10 @@ def is_bidirectionally_connected(graph, nodeA, nodeB):
     """判断两个节点是否有双向连接"""
     return graph.has_edge(nodeA, nodeB) and graph.has_edge(nodeB, nodeA)
 
+
 def unit_recursion(
-    G, node_li, gene_len_dic, refer_name, refer_prefixes=None, gene_variety_dic=None
+    G, node_li, gene_len_dic, refer_name, refer_prefixes=None, gene_variety_dic=None,
+    bed_dic=None, main_chroms=None,
 ):
     """分组：挑选代表节点并输出与其双向连接的簇（迭代实现）
 
@@ -67,7 +69,34 @@ def unit_recursion(
             results.append([pending[0]])
             break
 
+        eligible_representatives = pending
+        if len(pending) > 1 and bed_dic is not None:
+            main_chrom_set = set(main_chroms or MAIN_CHROMS)
+            if main_chroms:
+                from .assign_cluster_gene import build_main_chrom_order
+                main_chrom_set = set(build_main_chrom_order(main_chroms))
+            eligible_representatives = [
+                node for node in pending
+                if bed_dic.get(node, (None,))[0] in main_chrom_set
+            ]
+            if not eligible_representatives:
+                for node in pending:
+                    compatible = [
+                        index
+                        for index, cluster in enumerate(results)
+                        if cluster and any(is_bidirectionally_connected(G, node, member) for member in cluster)
+                    ]
+                    if compatible:
+                        results[compatible[0]].append(node)
+                    else:
+                        results.append([node])
+                break
         node_degree_dic = calculate_in_degree_in_scc(G, set(pending))
+        if len(pending) > 1 and bed_dic is not None:
+            node_degree_dic = {
+                node: degree for node, degree in node_degree_dic.items()
+                if node in eligible_representatives
+            }
         if not node_degree_dic:
             # 无法计算入度时，将剩余节点全部作为单节点簇输出
             results.extend([[node] for node in sorted(pending)])
@@ -136,6 +165,39 @@ def _cluster_gene_set(clusters):
     return {gene for cluster in clusters for gene in cluster}
 
 
+def _attach_reciprocal_contig_singletons(clusters, graph, bed_dic, main_chroms, gene_variety_dic):
+    """Attach singleton unplaced genes to any cluster with direct reciprocal support."""
+    main_chrom_set = set(main_chroms or MAIN_CHROMS)
+    if main_chroms:
+        from .assign_cluster_gene import build_main_chrom_order
+        main_chrom_set = set(build_main_chrom_order(main_chroms))
+    for source_index, source_cluster in enumerate(clusters):
+        if len(source_cluster) != 1:
+            continue
+        gene = source_cluster[0]
+        if bed_dic.get(gene, (None,))[0] in main_chrom_set:
+            continue
+        candidates = []
+        for target_index, target_cluster in enumerate(clusters):
+            if target_index == source_index or not target_cluster:
+                continue
+            linked = [
+                member for member in target_cluster
+                if is_bidirectionally_connected(graph, gene, member)
+            ]
+            if linked:
+                same_variety = any(
+                    gene_variety_dic.get(member) == gene_variety_dic.get(gene)
+                    for member in linked
+                ) if gene_variety_dic else False
+                candidates.append((not same_variety, len(target_cluster), target_index))
+        if candidates:
+            target_index = min(candidates)[2]
+            clusters[target_index].append(gene)
+            clusters[source_index] = []
+    return [cluster for cluster in clusters if cluster]
+
+
 def derive_last_clusters_from_pre(
     pre_clusters, G, gene_len_dic, bed_dic, variety_li, refer_name,
     main_chroms=None, refer_prefixes=None, gene_variety_dic=None,
@@ -157,6 +219,7 @@ def derive_last_clusters_from_pre(
                 main_chroms=main_chroms,
                 refer_prefixes=refer_prefixes,
                 gene_variety_dic=gene_variety_dic,
+                graph=G,
             )
             derived_clusters = []
             for ac in assigned_cluster:
@@ -171,6 +234,8 @@ def derive_last_clusters_from_pre(
                             refer_name,
                             refer_prefixes=refer_prefixes,
                             gene_variety_dic=gene_variety_dic,
+                            bed_dic=bed_dic,
+                            main_chroms=main_chroms,
                         )
                     )
 
@@ -179,7 +244,9 @@ def derive_last_clusters_from_pre(
         last_clusters.extend(
             _attach_missing_cluster_members(derived_clusters, omitted_genes, cluster[0])
         )
-    return last_clusters
+    return _attach_reciprocal_contig_singletons(
+        last_clusters, G, bed_dic, main_chroms, gene_variety_dic or {}
+    )
 
 def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chroms=None, refer_prefixes=None, gene_variety_dic=None):
     """
@@ -199,6 +266,8 @@ def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chr
                 refer_name,
                 refer_prefixes=refer_prefixes,
                 gene_variety_dic=gene_variety_dic,
+                bed_dic=bed_dic,
+                main_chroms=main_chroms,
             )
             pre_cluster.extend(clusters)
     last_clusters = derive_last_clusters_from_pre(

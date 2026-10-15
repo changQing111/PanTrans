@@ -134,8 +134,8 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
         ) as handle:
             version_module = handle.read()
 
-        self.assertIn('version = "0.3.0"', pyproject)
-        self.assertIn('__version__ = "0.3.0"', version_module)
+        self.assertIn('version = "0.4.0"', pyproject)
+        self.assertIn('__version__ = "0.4.0"', version_module)
 
 
 if __name__ == "__main__":

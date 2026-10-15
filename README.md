@@ -150,7 +150,8 @@ Given `--prefix test_pantrans`, PanTrans writes:
 - `<prefix>_unrenamed.gtf` and `<prefix>_unrenamed_cdna.refer.fasta`
   retain the final `last` representative IDs used by the graph, BED, and cluster files.
 - `<prefix>.gtf` and `<prefix>_cdna.refer.fasta` contain the same final
-  transcript models renamed to official `Pan...` IDs such as `Pan1A000001`.
+  transcript models renamed to official `Pan...` IDs such as `PanChr1A000001`.
+  IDs preserve the representative gene's exact BED chromosome name after `Pan`.
 
 ### Exporting a graph from an existing construct result
 

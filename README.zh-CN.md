@@ -118,7 +118,7 @@ pantrans construct \
 
 - `pre.gtf` 保留簇中心基因 ID 和转录本 ID。
 - `<prefix>_unrenamed.gtf` 与 `<prefix>_unrenamed_cdna.refer.fasta` 保留图、BED 和簇文件使用的最终 `last` 代表 ID。
-- `<prefix>.gtf` 与 `<prefix>_cdna.refer.fasta` 包含相同的最终转录本模型，但会将基因和转录本重命名为官方 `Pan...` ID，例如 `Pan1A000001`。
+- `<prefix>.gtf` 与 `<prefix>_cdna.refer.fasta` 包含相同的最终转录本模型，但会将基因和转录本重命名为官方 `Pan...` ID，例如 `PanChr1A000001`。`Pan` 之后原样保留代表基因对应的 BED 染色体名称。
 
 ### 从已有 Construct 结果导出图包
 

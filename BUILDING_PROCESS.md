@@ -2,7 +2,7 @@
 
 [中文版](BUILDING_PROCESS.zh-CN.md)
 
-This document describes the current PanTrans 0.3.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
+This document describes the current PanTrans 0.4.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
 
 ## 1. Core Model
 
@@ -17,7 +17,9 @@ The graph is clustered in two levels:
 - `pre` clusters are produced from strongly connected components and recursive graph decomposition.
 - `last` clusters are the final chromosome-aware clusters used to generate the pan-genome and pan-transcriptome reference outputs.
 
-The first gene in each cluster is its representative. Reference preference during tie-breaking uses the BED column-5 variety label. Final representatives receive deterministic official IDs such as `Pan1A000001`, while an additional unrenamed transcriptome keeps the original representative IDs for later incremental append runs.
+For multi-gene SCC decomposition, representatives are selected only from genes on configured main chromosomes; Ctg genes can be representatives only for singleton components. During `last` assignment, Ctg genes are withheld from coordinate-based variety assignment and attached to a candidate cluster only when they have a direct reciprocal graph edge with a member, preferring a reciprocal homolog from the same variety. Ctg genes without such a homolog remain singleton clusters.
+
+The first gene in each cluster is its representative. Reference preference during tie-breaking uses the BED column-5 variety label. Final representatives receive deterministic official IDs such as `PanChr1A000001` (`Pan` + the representative gene's exact BED chromosome name + a six-digit ordinal), while an additional unrenamed transcriptome keeps the original representative IDs for later incremental append runs.
 
 ## 2. Input and ID Conventions
 

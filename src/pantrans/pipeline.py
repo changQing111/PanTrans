@@ -336,12 +336,10 @@ def _validate_history_transcriptome(
 
 
 def _normalize_chrom_label(chrom):
-    chrom = chrom.strip()
-    if len(chrom) == 2 and chrom[0] in "ABD" and chrom[1].isdigit():
-        return f"{chrom[1]}{chrom[0]}"
-    if len(chrom) == 2 and chrom[1] in "ABD" and chrom[0].isdigit():
-        return chrom
-    return "Ctg"
+    """Preserve the representative gene's BED chromosome name in official IDs."""
+    if not chrom or chrom == "." or any(char.isspace() for char in chrom):
+        raise ValueError(f"Invalid BED chromosome name for Pan ID: {chrom!r}")
+    return chrom
 
 def _build_gene_rename_map(
     cluster_dic,
@@ -386,7 +384,9 @@ def _build_gene_rename_map(
 
     chrom_hub_dic = {}
     for refer_gene in cluster_dic.keys():
-        chrom = bed_chrom_by_gene.get(refer_gene, "Ctg")
+        if refer_gene not in bed_chrom_by_gene:
+            raise ValueError(f"Cannot rename representative absent from BED: {refer_gene}")
+        chrom = bed_chrom_by_gene[refer_gene]
         chrom_label = _normalize_chrom_label(chrom)
         chrom_hub_dic.setdefault(chrom_label, []).append(refer_gene)
 
@@ -402,6 +402,8 @@ def _build_gene_rename_map(
         )
         for index, refer_gene in enumerate(sorted_hubs, start=1):
             rename_map[refer_gene] = f"{prefix}{chrom_label}{index:06d}"
+    if len(set(rename_map.values())) != len(rename_map):
+        raise ValueError("BED chromosome names and numeric suffixes produce duplicate Pan IDs")
     return rename_map
 
 def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_path,
