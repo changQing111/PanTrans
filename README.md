@@ -265,6 +265,40 @@ version. PanTrans also verifies the primary query IDs and sequence identities
 against the current cDNA FASTA before re-filtering the reused BAM with the
 current thresholds.
 
+## CNV screening
+
+Screen existing pre clusters without rerunning alignment or clustering:
+
+```bash
+pantrans cnv \
+  --pre-cluster five_variety_construct_out/five_variety_pre.tmp.cluster \
+  --bed five_variety_genes.bed \
+  --reference CS \
+  --output five_variety.cnv.genes.txt
+```
+
+A cluster qualifies when two or more distinct genes from the same BED column-5
+variety lie on the same BED chromosome with interval gaps at most 1,000,000 bp.
+The gap is `max(0, next_start - current_group_max_end)` for sorted BED intervals;
+overlaps have zero gap. Chains are transitive: A–B and B–C within the threshold
+belong to one group even if A–C exceeds it. Strand is not a restriction.
+Detection stops at the first qualifying group in each cluster; it does not
+require different copy counts between varieties.
+
+The output is a plain text file with **one original gene ID per hit pre cluster**,
+without a header, in input cluster order. Representatives are chosen from the
+**entire cluster**, preferring the `-r` variety, then the longest BED interval
+(`end-start`), then the lexicographically smallest gene ID. The representative
+need not belong to the first detected group. If the reference variety is absent
+from a particular cluster, the longest member wins. The reference must exist in
+the BED overall. No hits produces an empty file.
+
+`--max-gap` can override the default in bp. The BED must cover every cluster
+member and use 0-based, half-open coordinates and valid variety labels. Distinct
+contigs must have distinct BED chromosome names; a shared `contig` label cannot
+establish proximity on separate unplaced sequences. This command applies the
+specified proximity rule, not a between-variety copy-number comparison.
+
 ## Output interpretation
 
 - `pre.tmp.cluster`: graph-derived intermediate clustering before final recursive refinement

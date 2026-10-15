@@ -2,6 +2,7 @@ import sys
 import argparse
 import logging
 from .pipeline import unit_construct, unit_append
+from .cnv import detect_cnv
 
 
 def setup_logging(level=logging.INFO):
@@ -19,7 +20,7 @@ def read_parameters(argv=None):
     )
     # subcommands
     subparsers = parser.add_subparsers(
-        title="subcommand", description="construct or append", dest="subcommand"
+        title="subcommand", description="construct, append, or cnv", dest="subcommand"
     )
     subparsers.required = True
 
@@ -127,7 +128,18 @@ def read_parameters(argv=None):
         "-o", "--output", required=True, help="output dir"
     )
 
+    cnv_parser = subparsers.add_parser(
+        "cnv", help="Screen pre clusters for nearby same-variety gene copies"
+    )
+    cnv_parser.add_argument("--pre-cluster", required=True, help="pre.tmp.cluster file")
+    cnv_parser.add_argument("-b", "--bed", required=True, help="complete gene BED with varieties in column 5")
+    cnv_parser.add_argument("-r", "--reference", required=True, help="preferred representative variety")
+    cnv_parser.add_argument("-o", "--output", required=True, help="output text file: one representative gene ID per hit cluster")
+    cnv_parser.add_argument("--max-gap", type=int, default=1_000_000, help="maximum BED interval gap in bp (default: 1000000)")
+
     args = parser.parse_args(argv)
+    if args.subcommand == "cnv" and args.max_gap < 0:
+        cnv_parser.error("--max-gap must be nonnegative")
     
     return args
 
@@ -168,10 +180,18 @@ def main():
         )
         return 0
 
+    elif args.subcommand == "cnv":
+        try:
+            detect_cnv(args.pre_cluster, args.bed, args.reference, args.output, args.max_gap)
+        except (ValueError, OSError) as exc:
+            logging.getLogger(__name__).error("CNV screening failed: %s", exc)
+            return 1
+        return 0
+
     else:
         # No subcommand provided; log an error message.
         logger = logging.getLogger(__name__)
-        logger.error("No subcommand specified. Use 'construct' or 'append'.")
+        logger.error("No subcommand specified. Use 'construct', 'append', or 'cnv'.")
         return 1
 
 

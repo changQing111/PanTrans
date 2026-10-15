@@ -2,7 +2,7 @@
 
 [English](BUILDING_PROCESS.md)
 
-本文档描述 PanTrans 0.4.0 的当前实现，包括使用 `construct` 进行多品种全新构建，以及使用 `append` 进行可连续追加的增量更新。
+本文档描述 PanTrans 0.5.0 的当前实现，包括使用 `construct` 进行多品种全新构建，以及使用 `append` 进行可连续追加的增量更新。
 
 ## 1. 核心模型
 

@@ -2,7 +2,7 @@
 
 [中文版](BUILDING_PROCESS.zh-CN.md)
 
-This document describes the current PanTrans 0.4.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
+This document describes the current PanTrans 0.5.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
 
 ## 1. Core Model
 

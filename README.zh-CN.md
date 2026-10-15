@@ -207,6 +207,34 @@ pantrans append \
 
 如果 append 在任意交叉比对完成后失败，可以使用对应的 `--query-to-all-bam` 和/或 `--history-to-query-bam` 路径重新运行。BAM 必须包含 `minimap2` 的 `@PG` 记录，且版本和生成图边时使用的参数一致。PanTrans 还会将 BAM 中的主查询 ID 和序列摘要与当前 cDNA FASTA 对照，然后使用当前阈值重新过滤复用的 BAM。
 
+## CNV 筛选
+
+使用已有 pre cluster 和完整 BED，不重新运行比对或聚类：
+
+```bash
+pantrans cnv \
+  --pre-cluster five_variety_construct_out/five_variety_pre.tmp.cluster \
+  --bed five_variety_genes.bed \
+  --reference CS \
+  --output five_variety.cnv.genes.txt
+```
+
+逐簇检查是否存在同一品种（BED 第 5 列）、同一染色体上的至少两个不同基因，
+BED 区间间隔不超过 1,000,000 bp。基因按坐标排序后，间隔为
+`max(0, 下一基因 start - 当前组最大 end)`；重叠间隔为 0，不限制链方向。
+采用链式邻近：A–B 和 B–C 均符合条件时，三个基因归为一组，即使 A–C 超过阈值。
+每个簇发现首个符合条件的组后即停止检测，不要求不同品种的拷贝数不同。
+
+输出为**每个命中 pre cluster 一个原始 gene ID**，无表头，按输入簇顺序排列。
+代表从**整个簇**选择：优先 `-r` 指定品种，其次 BED 区间长度 `end-start` 最大，
+再次按 gene ID 字典序选择。代表不一定属于首个检出的邻近组。
+该簇不含参考品种时选择其他成员中最长者；参考品种必须存在于完整 BED 中。
+无命中时输出空文件。`-o` 指定输出文件路径，`--max-gap` 可调整间隔阈值（单位 bp）。
+
+BED 必须覆盖所有簇成员，使用 0-based、半开区间和有效品种标签。
+不同未挂载序列必须使用不同的 BED 第 1 列名称；若统一标成 `contig`，无法据此区分
+不同序列上的局部坐标。此命令实现上述邻近筛选规则，不进行品种间拷贝数差异比较。
+
 ## 输出说明
 
 - `pre.tmp.cluster`：图推导出的中间簇，在最终递归细分之前生成
