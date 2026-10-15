@@ -8,6 +8,10 @@ PanTrans 是一个命令行工具，用于从多个品种构建多倍体生物�
 
 ## 功能
 
+**0.6.0** 新增候选易位筛选和独立可视化脚本。
+
+- 用 `cnv` 筛选邻近基因拷贝，用 `translocation` 从 pre cluster 筛选候选染色体间位置差异
+
 - 使用 `construct` 从多个品种构建泛基因簇和泛转录本簇
 - 使用 `construct --bam` 复用已有的 cDNA-to-gDNA BAM，跳过 `minimap2` 比对
 - 使用 `construct --main-chroms` 指定主染色体
@@ -15,6 +19,20 @@ PanTrans 是一个命令行工具，用于从多个品种构建多倍体生物�
 - 生成 `pre` 和 `last` 两级结果，包括 `pre.tmp.cluster`、`last.tmp.cluster`、`pre.gtf`、`gtf`、参考 FASTA 和参考 BED
 - 使用 `append` 在已有参考集合中追加新品种
 - 在最终 GTF/cDNA 结果中同时保留原始代表 ID 和官方 `Pan...` ID
+
+## 易位结果可视化
+
+独立脚本 `scripts/plot_translocations.py` 提供染色体总览和局部基因匹配图，
+使用三次贝塞尔曲线连接，支持 `--flank`、可选歧义匹配，以及 PDF/PNG/SVG 输出。
+绘图依赖 Matplotlib，需单独安装：
+
+```bash
+pip install matplotlib
+python scripts/plot_translocations.py --help
+```
+
+参数和输入格式见[绘图说明](scripts/plot_translocations.md)。脚本不重新检测易位；
+图中范围为候选锚点覆盖区间，不是断点。
 
 ## 安装
 
@@ -234,6 +252,73 @@ BED 区间间隔不超过 1,000,000 bp。基因按坐标排序后，间隔为
 BED 必须覆盖所有簇成员，使用 0-based、半开区间和有效品种标签。
 不同未挂载序列必须使用不同的 BED 第 1 列名称；若统一标成 `contig`，无法据此区分
 不同序列上的局部坐标。此命令实现上述邻近筛选规则，不进行品种间拷贝数差异比较。
+
+## 候选易位检测
+
+使用同一次构建的 pre cluster、完整 BED 和有向图边文件，将每个非参考品种分别与
+`-r` 指定品种比较，不重新比对、加载 BAM 或聚类：
+
+```bash
+pantrans translocation \
+  --pre-cluster five_variety_construct_out/five_variety_pre.tmp.cluster \
+  --bed five_variety_genes.bed \
+  --edges five_variety_construct_out/five_variety.graph.edges.tsv \
+  --main-chroms main_chroms \
+  --reference CS \
+  --output-prefix five_variety
+```
+
+BED 第 5 列定义品种，必须包含所有簇成员和图边端点。一个基因只能出现在一个
+pre cluster 中。图边 TSV 为无表头的两列 `source_gene`、`target_gene`。
+只接受同一 pre cluster 内直接存在两个方向图边的参考/目标品种基因对，
+自连接、单向连接和间接路径不算支持，重复边不增加证据。
+不含参考品种基因的簇跳过，并在日志中统计。
+
+`--main-chroms` 必填，一行一个 BED 染色体原名；各品种染色体名称应保持一致。
+此命令不把 `Chr1A` 自动转换为 `1A`。不在列表中的序列视为未定位（Ctg/contig）。
+默认排除任一端为未定位基因的关系，不输出，也不参与双向匹配数和拷贝歧义统计。
+显式添加 `--include-unplaced` 后，才将这些关系纳入统计并以 `unplaced` 状态报告，
+仍不用于构建易位区段。
+
+同染色体双向匹配优先视为正常匹配，不写入候选表。对于跨染色体基因对，
+如果任一端点还有同染色体双向匹配，或在当前参考/目标品种比较中有多个双向匹配，
+则标记为 `ambiguous_copy`，保留供检查，但不作为区段锚点。
+仅启用 `--include-unplaced` 时，额外的未定位双向匹配才计入匹配数量。
+首版不会仅凭邻域证据消除多拷贝歧义。
+
+只有一对一、直接双向连接的跨染色体基因对才能作为锚点。
+区段内必须是同一目标品种、相同的参考染色体与目标染色体组合，
+并且两侧起始坐标顺序一致；使用 `--allow-reverse` 时也接受目标侧整体反向。
+区间可以重叠，但起始坐标相同不能提供独立顺序证据。
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `--min-anchor-genes` | `3` | 支持区段至少来自多少个不同 pre cluster；最小允许值为 2 |
+| `--max-gap` | `1000000` | 相邻锚点在两侧各自的 BED 区间间隔上限，单位 bp；重叠按 0 计算 |
+| `--max-skipped-genes` | `5` | 两侧相邻锚点之间各自允许跳过的基因数，按完整 BED 计数，包含非锚点基因 |
+| `--allow-reverse` | 关闭 | 接受目标基因顺序反向的区段，方向由基因排列决定，不依赖 BED 链方向 |
+| `--include-unplaced` | 关闭 | 纳入未定位基因对的报告及歧义统计，但不作为区段锚点 |
+
+算法在上述限制内计算最长路径候选，再确定性地选择互不重叠的锚点链；
+一个锚点最多进入一个区段，不穷举所有可能的重排。
+距离限制作用于相邻锚点，不限制区段总长度。
+单个大基因家族/pre cluster 即使提供多个基因对，也不能独自构成支持区段。
+
+输出两个 TSV 文件，`-o` / `--output-prefix` 指定的是**文件前缀**：
+
+- `five_variety.translocation.genes.tsv`：原始基因 ID、两侧 BED 坐标、品种、
+  双向匹配数、是否存在同染色体替代匹配、状态、原因、区段 ID。
+  `pre_000123` 表示输入 cluster 文件的第 123 行。
+  状态为 `supported_block`、`single_gene_candidate`、`ambiguous_copy` 或 `unplaced`。
+- `five_variety.translocation.blocks.tsv`：候选区段、排列方向、锚点数、不同簇数及支持基因。
+  至少两个锚点但独立簇数未达阈值的链标为 `low_support_block`，其基因行仍标为
+  `single_gene_candidate`；单个孤立基因对没有区段，`block_id` 为 `.`。
+
+所有坐标为 BED 的 0-based 半开区间。区段范围覆盖支持基因，**不是易位断点**。
+无命中时也输出表头。两份报告先写入临时文件，发布失败时恢复旧报告；
+日志记录阈值和统计信息。
+`supported_block` 表示存在共线性证据的候选位置差异，不等于已证实易位，
+不能确定变化发生在哪个品种的进化分支，也不能排除组装、注释或拷贝歧义。
 
 ## 输出说明
 

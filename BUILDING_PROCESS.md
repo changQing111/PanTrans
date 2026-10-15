@@ -2,7 +2,7 @@
 
 [中文版](BUILDING_PROCESS.zh-CN.md)
 
-This document describes the current PanTrans 0.5.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
+This document describes the current PanTrans 0.6.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
 
 ## 1. Core Model
 
@@ -386,6 +386,19 @@ PanTrans does not currently:
 - treat a representative-only historical sequence set as a replacement for the complete historical graph.
 
 ## 10. Implementation Map
+
+The independent `translocation` subcommand reads pre clusters, complete BED
+coordinates, a main-chromosome list and the directed edge TSV from a completed
+run. It compares every non-reference variety to `-r`, requires direct reciprocal
+edges within a pre cluster, and excludes same-chromosome alternatives, multiple
+matches and unplaced genes from block anchors. By default, supported candidate
+blocks require three distinct pre clusters, at most 1 Mb between neighboring
+anchors on each side and at most five intervening BED genes. Reversed gene order
+is optional. Gene and block TSVs retain ambiguous and low-support evidence; no
+alignment or cluster modification occurs. See the README for options and status
+definitions. Unplaced pairs are excluded from reports and ambiguity counts by
+default; `--include-unplaced` includes them as `unplaced` without allowing block
+anchoring. The implementation is `src/pantrans/translocation.py`.
 
 | Responsibility | Module |
 | --- | --- |

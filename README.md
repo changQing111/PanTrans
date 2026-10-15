@@ -8,6 +8,10 @@ The current implementation builds gene-level relationship graphs from cDNA-to-gD
 
 ## Features
 
+Version **0.6.0** adds candidate translocation screening and standalone visualization.
+
+- Screen pre clusters for nearby gene copies with `cnv` and candidate chromosome changes with `translocation`
+
 - Build pan-gene and pan-transcript clusters from multiple varieties with `construct`
 - Reuse an existing BAM file with `construct --bam`
 - Control the definition of main chromosomes with `construct --main-chroms`
@@ -16,6 +20,20 @@ The current implementation builds gene-level relationship graphs from cDNA-to-gD
   `pre.tmp.cluster`, `last.tmp.cluster`, `pre.gtf`, `gtf`, reference FASTA files, and reference BED files
 - Append new varieties to an existing reference set with `append`
 - Retain both original representative IDs and official `Pan...` IDs in final GTF/cDNA outputs
+
+## Translocation visualization
+
+The standalone `scripts/plot_translocations.py` draws chromosome overviews and local
+gene correspondences with cubic Bezier connections. It supports `--flank`, optional
+ambiguous matches, and PDF/PNG/SVG export. Install Matplotlib separately:
+
+```bash
+pip install matplotlib
+python scripts/plot_translocations.py --help
+```
+
+See [plotting usage and input formats](scripts/plot_translocations.md). This script
+does not rerun detection; plotted spans are candidate anchor spans, not breakpoints.
 
 ## Installation
 
@@ -298,6 +316,80 @@ member and use 0-based, half-open coordinates and valid variety labels. Distinct
 contigs must have distinct BED chromosome names; a shared `contig` label cannot
 establish proximity on separate unplaced sequences. This command applies the
 specified proximity rule, not a between-variety copy-number comparison.
+
+## Candidate translocations
+
+Compare each non-reference variety with `-r` using existing pre clusters, the
+complete BED, and the directed graph edge sidecar from the same run:
+
+```bash
+pantrans translocation \
+  --pre-cluster five_variety_construct_out/five_variety_pre.tmp.cluster \
+  --bed five_variety_genes.bed \
+  --edges five_variety_construct_out/five_variety.graph.edges.tsv \
+  --main-chroms main_chroms \
+  --reference CS \
+  --output-prefix five_variety
+```
+
+No alignment, BAM loading, or re-clustering is performed. BED column 5 defines
+varieties. All cluster and edge genes must exist in the complete BED; pre-cluster
+membership must be unique. The edge TSV has two columns (`source_gene`,
+`target_gene`), no header. Both directed edges must exist **within the same pre
+cluster**; self edges, indirect paths and one-way matches do not support a pair.
+Duplicate edges do not increase support. Clusters without reference genes are
+counted in the log and skipped.
+
+`--main-chroms` is required: use one exact BED chromosome label per line. Names
+must be consistent between varieties; `Chr1A` and `1A` are not normalized by this
+command. By default, pairs with either gene outside this list are excluded from
+reports AND reciprocal-partner/ambiguity counts. Use `--include-unplaced` to
+include these pairs as `unplaced`; they never anchor translocation blocks.
+Same-chromosome reciprocal pairs are
+considered normal and omitted from the gene report. A cross-chromosome pair is
+`ambiguous_copy` if either endpoint also has a same-chromosome reciprocal match
+or multiple reciprocal partners in this reference/query-variety comparison.
+Only with `--include-unplaced` does an alternative unplaced partner count toward copy ambiguity. Ambiguous
+pairs are retained for inspection but cannot anchor blocks.
+
+Only one-to-one reciprocal cross-chromosome pairs anchor blocks. Anchors must
+share the query variety and both chromosome names. Their start coordinates must
+increase on both sides (or decrease on the query side with `--allow-reverse`).
+BED intervals may overlap, but tied starts provide no gene-order evidence.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--min-anchor-genes` | `3` | Minimum **distinct pre clusters** supporting a block; minimum allowed value is 2 |
+| `--max-gap` | `1000000` | Maximum interval gap in bp between successive anchors on **each** side; overlaps have gap 0 |
+| `--max-skipped-genes` | `5` | Maximum intervening genes on each side, counted from the **complete BED**, including non-anchors |
+| `--allow-reverse` | off | Also accept reversed query gene order; orientation is based on gene order, not BED strand |
+| `--include-unplaced` | off | Include unplaced pairs in the gene report and ambiguity counts, but never as block anchors |
+
+Chaining uses deterministic longest-path proposals within these limits, then
+greedily selects disjoint chains. An anchor belongs to at most one block. This
+does not enumerate all possible rearrangements. Gaps constrain adjacent anchors,
+not total block length. Many pairs from one family/pre cluster cannot by
+themselves produce a supported block.
+
+Outputs (the `-o` / `--output-prefix` argument is a **prefix**, not a directory):
+
+- `five_variety.translocation.genes.tsv`: original gene IDs, both BED intervals,
+  varieties, reciprocal partner counts, same-chromosome alternatives, status,
+  reason, and block ID. `pre_000123` refers to physical line 123 in the input
+  cluster file. Status is `supported_block`, `single_gene_candidate`,
+  `ambiguous_copy`, or `unplaced`.
+- `five_variety.translocation.blocks.tsv`: candidate spans, orientation, anchor
+  and independent-cluster counts, and ordered supporting genes. Chains with at
+  least two pairs but too few distinct clusters are `low_support_block`; their
+  gene rows retain `single_gene_candidate`. Isolated pairs have no block (`.`).
+
+All output coordinates are BED 0-based half-open. Block spans cover supporting
+genes and are **not breakpoint estimates**. Empty results still contain TSV
+headers. Both reports are staged before publication; detected publication
+failures restore prior outputs. The log records thresholds and screening counts.
+`supported_block` denotes collinear evidence for a candidate position difference
+relative to the reference, not proof of a translocation or its evolutionary
+direction. Collinearity does not resolve all copy, assembly or annotation errors.
 
 ## Output interpretation
 

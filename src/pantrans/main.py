@@ -3,6 +3,7 @@ import argparse
 import logging
 from .pipeline import unit_construct, unit_append
 from .cnv import detect_cnv
+from .translocation import detect_translocations
 
 
 def setup_logging(level=logging.INFO):
@@ -20,7 +21,7 @@ def read_parameters(argv=None):
     )
     # subcommands
     subparsers = parser.add_subparsers(
-        title="subcommand", description="construct, append, or cnv", dest="subcommand"
+        title="subcommand", description="construct, append, cnv, or translocation", dest="subcommand"
     )
     subparsers.required = True
 
@@ -137,9 +138,29 @@ def read_parameters(argv=None):
     cnv_parser.add_argument("-o", "--output", required=True, help="output text file: one representative gene ID per hit cluster")
     cnv_parser.add_argument("--max-gap", type=int, default=1_000_000, help="maximum BED interval gap in bp (default: 1000000)")
 
+    translocation_parser = subparsers.add_parser(
+        "translocation", help="Screen reciprocal pre-cluster homologs for chromosome changes"
+    )
+    translocation_parser.add_argument("--pre-cluster", required=True, help="pre.tmp.cluster file")
+    translocation_parser.add_argument("-b", "--bed", required=True, help="complete gene BED with varieties in column 5")
+    translocation_parser.add_argument("--edges", required=True, help="graph edge TSV containing directed gene edges")
+    translocation_parser.add_argument("--main-chroms", required=True, help="main chromosome names, one per line")
+    translocation_parser.add_argument("-r", "--reference", required=True, help="reference variety")
+    translocation_parser.add_argument("-o", "--output-prefix", required=True, help="prefix for .translocation.genes.tsv and .translocation.blocks.tsv")
+    translocation_parser.add_argument("--min-anchor-genes", type=int, default=3, help="minimum independent pre-cluster anchors for a supported block (default: 3)")
+    translocation_parser.add_argument("--max-gap", type=int, default=1_000_000, help="maximum interval gap on either chromosome in bp (default: 1000000)")
+    translocation_parser.add_argument("--max-skipped-genes", type=int, default=5, help="maximum intervening BED genes allowed per side (default: 5)")
+    translocation_parser.add_argument("--allow-reverse", action="store_true", help="also report collinear blocks in reverse orientation")
+    translocation_parser.add_argument("--include-unplaced", action="store_true", help="include pairs with unplaced genes in reports and ambiguity counts (never as block anchors)")
+
     args = parser.parse_args(argv)
     if args.subcommand == "cnv" and args.max_gap < 0:
         cnv_parser.error("--max-gap must be nonnegative")
+    if args.subcommand == "translocation":
+        if args.min_anchor_genes < 2:
+            translocation_parser.error("--min-anchor-genes must be at least 2")
+        if args.max_gap < 0 or args.max_skipped_genes < 0:
+            translocation_parser.error("--max-gap and --max-skipped-genes must be nonnegative")
     
     return args
 
@@ -188,10 +209,23 @@ def main():
             return 1
         return 0
 
+    elif args.subcommand == "translocation":
+        try:
+            detect_translocations(
+                args.pre_cluster, args.bed, args.edges, args.main_chroms,
+                args.reference, args.output_prefix, args.min_anchor_genes,
+                args.max_gap, args.max_skipped_genes, args.allow_reverse,
+                include_unplaced=args.include_unplaced,
+            )
+        except (ValueError, OSError) as exc:
+            logging.getLogger(__name__).error("Translocation screening failed: %s", exc)
+            return 1
+        return 0
+
     else:
         # No subcommand provided; log an error message.
         logger = logging.getLogger(__name__)
-        logger.error("No subcommand specified. Use 'construct', 'append', or 'cnv'.")
+        logger.error("No subcommand specified. Use 'construct', 'append', 'cnv', or 'translocation'.")
         return 1
 
 
