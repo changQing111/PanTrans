@@ -2,7 +2,7 @@
 
 [中文版](BUILDING_PROCESS.zh-CN.md)
 
-This document describes the current PanTrans 0.6.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
+This document describes the current PanTrans 0.7.0 implementation. It covers both a new multi-variety build with `construct` and a chained incremental update with `append`.
 
 ## 1. Core Model
 
@@ -29,7 +29,7 @@ The first gene in each cluster is its representative. Reference preference durin
 | gDNA FASTA | Gene sequences used as alignment targets | FASTA IDs are gene IDs, for example `CS.g1` |
 | BED | Gene coordinates, variety, and strand | Column 4 is the gene ID, column 5 is the variety, column 1 is the chromosome or contig |
 | Variety names | Derived from BED column 5 | Every gene must have a non-empty variety label |
-| Historical GTF | Previous unrenamed final transcript models | GTF sequence name must equal `gene_id`; transcript IDs use `<gene_id>.<number>` |
+| Historical GFF3 | Previous unrenamed final transcript models | GFF3 sequence name must equal the gene `ID`; transcript IDs use `<gene_id>.<number>` |
 
 Gene IDs must be unique across historical and newly appended varieties. Variety identity is taken from BED column 5, so gene-ID prefixes do not need to encode the variety.
 
@@ -71,7 +71,7 @@ flowchart TD
     G --> H["Chromosome-aware refinement -> last clusters"]
     H --> I["Write reusable graph package"]
     H --> J["Generate pre transcript and sequence outputs"]
-    J --> K["Generate unrenamed final GTF; rescue missing models only with --rescue"]
+    J --> K["Generate unrenamed final GFF3; rescue missing models only with --rescue"]
     K --> L["Deterministically rename to official Pan IDs"]
     L --> M["Write official and unrenamed cDNA plus reference gDNA/BED"]
 ```
@@ -149,19 +149,19 @@ Sidecar edge and node paths are stored relative to the manifest. External sequen
 
 For each cluster representative, PanTrans extracts the best alignment for each candidate transcript and reconstructs exon coordinates and splice intervals.
 
-Candidates are grouped by splice-pattern containment. For each group, the longest valid transcript is selected as the representative isoform. GTF coordinates are clamped to the representative gene length.
+Candidates are grouped by splice-pattern containment. For each group, the longest valid transcript is selected as the representative isoform. GFF3 coordinates are clamped to the representative gene length.
 
 The `pre` output is written with original IDs:
 
 ```text
-<prefix>_pre.gtf
+<prefix>_pre.gff3
 <prefix>_pre_cdna.refer.fasta
 <prefix>_pre_gdna.refer.fasta
 <prefix>_pre.refer.bed
 ```
 
 If `--rescue` is specified, a cluster representative with no transcript model is
-first recovered from a matching model in the `pre` GTF when possible, then by a
+first recovered from a matching model in the `pre` GFF3 when possible, then by a
 targeted rescue alignment for remaining missing genes. Without `--rescue`, no
 recovery alignment is performed.
 
@@ -169,24 +169,29 @@ recovery alignment is performed.
 
 Final `last` output is generated in two forms:
 
-1. Transcript deduplication writes `<prefix>_unrenamed.gtf` with original representative gene IDs; rescue is added only when `--rescue` is specified.
-2. PanTrans validates each transcript ID as `<original_gene_id>.<numeric_suffix>`.
-3. The GTF `gene_id` and `transcript_id` attributes are mapped through the deterministic `Pan...` rename map while preserving the numeric transcript suffix. GTF column 1 remains the original representative sequence name so the coordinates still refer to the original gDNA record.
-4. The official GTF is sorted by Pan gene order.
-5. cDNA is reconstructed independently from both GTF files.
+1. Transcript deduplication writes `<prefix>_unrenamed.gff3` with original representative gene IDs; rescue is added only when `--rescue` is specified.
+2. PanTrans validates each transcript ID as `<original_gene_id>.<numeric_suffix>` and extracts unrenamed cDNA.
+3. With `--annotate-cds`, TransDecoder runs once on this cDNA. Its CDS coordinates are projected through exons; GFF3 CDS includes the stop codon, and UTRs are added only at supported ORF boundaries. Spliced CDS segments share one ID with strand-aware phase.
+4. The GFF3 gene, mRNA and child `ID`/`Parent` attributes are mapped through the deterministic `Pan...` rename map while preserving the numeric transcript suffix. GFF3 column 1 remains the original representative sequence name so the coordinates still refer to the original gDNA record.
+5. The official GFF3 is sorted with parents before children, and official cDNA is extracted from it.
+
+All new annotation files, including pre and rescue intermediates, contain a single
+`##gff-version 3` header and gene/mRNA/exon hierarchies. Append uses
+`--history-gff3`; legacy GTF input and the `--history-gtf` alias remain supported
+for migration, but no new GTF files are emitted.
 
 The final outputs are:
 
 ```text
-<prefix>_unrenamed.gtf
+<prefix>_unrenamed.gff3
 <prefix>_unrenamed_cdna.refer.fasta
-<prefix>.gtf
+<prefix>.gff3
 <prefix>_cdna.refer.fasta
 <prefix>_gdna.refer.fasta
 <prefix>.refer.bed
 ```
 
-The two GTF/cDNA pairs describe the same final transcript models. Their attribute and FASTA IDs differ: the unrenamed pair is the chaining interface for `append`, while the official pair is the public `Pan...` result.
+The two GFF3/cDNA pairs describe the same final transcript models. Their attribute and FASTA IDs differ: the unrenamed pair is the chaining interface for `append`, while the official pair is the public `Pan...` result.
 
 ## 5. Append Workflow
 
@@ -195,7 +200,7 @@ For a historical set `H` and a new set `N`, append reuses `H -> H` graph edges a
 ```mermaid
 flowchart TD
     A["Historical graph package"] --> B["Validate sources and edge provenance"]
-    C["Historical unrenamed GTF and cDNA"] --> D["Validate exact transcript agreement"]
+    C["Historical unrenamed GFF3 and cDNA"] --> D["Validate exact transcript agreement"]
     E["New cDNA, gDNA, BED, and names"] --> F["Validate new IDs and BED coverage"]
     B --> G["Build merged working cDNA, gDNA, and BED"]
     D --> G
@@ -209,8 +214,8 @@ flowchart TD
     J --> M["Add N -> H, N -> N, and H -> N edges"]
     L --> N["Shared construct clustering flow"]
     M --> N
-    N --> O["Pre output without historical GTF seed"]
-    N --> P["Final output seeded by historical GTF"]
+    N --> O["Pre output without historical GFF3 seed"]
+    N --> P["Final output seeded by historical GFF3"]
     P --> Q["Write new graph package and dual final transcriptomes"]
 ```
 
@@ -219,7 +224,7 @@ flowchart TD
 | Option | Role |
 | --- | --- |
 | `--cdna` | Previous run's `<prefix>_unrenamed_cdna.refer.fasta` |
-| `--history-gtf` | Matching previous `<prefix>_unrenamed.gtf` |
+| `--history-gff3` | Matching previous `<prefix>_unrenamed.gff3` |
 | `--query-cdna` | Complete cDNA FASTA for the new variety |
 | `--gdna` | Complete gDNA FASTA for the new variety |
 | `--bed` | Historical pre-cluster representatives plus every new gene; column 5 must label every row |
@@ -240,10 +245,10 @@ Before alignment, append validates:
 - no duplicate gene IDs between historical and new gDNA;
 - every historical and new gene has exactly one BED column-5 variety label;
 - every query cDNA gene exists in query gDNA;
-- exact equality between historical GTF transcript IDs and historical cDNA FASTA IDs;
-- historical GTF sequence names equal their `gene_id` attributes;
+- exact equality between historical GFF3 transcript IDs and historical cDNA FASTA IDs;
+- historical GFF3 sequence names equal their gene `ID` attributes;
 - historical transcript IDs follow `<gene_id>.<number>`;
-- historical GTF genes belong to the historical graph and do not use official `Pan...` IDs.
+- historical GFF3 genes belong to the historical graph and do not use official `Pan...` IDs.
 
 These checks fail before minimap2 starts.
 
@@ -311,40 +316,40 @@ The merged graph is passed to the same `_derive_graph_and_clusters()` helper use
 
 Append `pre` output uses only candidates reconstructed from the merged filtered BAM.
 
-Append final `last` output additionally loads the previous unrenamed GTF as an authoritative seed:
+Append final `last` output additionally loads the previous unrenamed GFF3 as an authoritative seed:
 
-- historical exon coordinates and splice intervals are reconstructed from the GTF;
+- historical exon coordinates and splice intervals are reconstructed from the GFF3;
 - a historical seed is used only if its original representative gene is still a key in the current `last` cluster dictionary;
 - seed records override BAM candidates with the same transcript ID;
 - seeds whose representative changed are counted and skipped because their coordinates cannot be projected onto another representative sequence without alignment;
 - seeded and BAM-derived candidates then pass through the normal splice-pattern grouping and longest-transcript selection.
 
-The result is again written first as an unrenamed GTF/cDNA pair and then deterministically converted to the official `Pan...` pair.
+The result is again written first as an unrenamed GFF3/cDNA pair and then deterministically converted to the official `Pan...` pair.
 
 ### 5.7 Write the Next Graph Package
 
 Append writes a new graph package containing the merged graph, merged node state, merged filtered BAM, accumulated source gDNA parts, the historical nonredundant cDNA plus new cDNA, and all edge-provenance generations.
 
-This package and the new unrenamed GTF/cDNA pair are the historical inputs for the next append.
+This package and the new unrenamed GFF3/cDNA pair are the historical inputs for the next append.
 
 ## 6. Chained Append
 
 ```text
 construct output
   -> graph.json
-  -> _unrenamed.gtf
+  -> _unrenamed.gff3
   -> _unrenamed_cdna.refer.fasta
 
 append variety 1
   -> new graph.json
-  -> new _unrenamed.gtf
+  -> new _unrenamed.gff3
   -> new _unrenamed_cdna.refer.fasta
 
 append variety 2
   -> repeat with the latest three historical artifacts
 ```
 
-Always use all three artifacts from the same successful run. Mixing a graph package with a GTF/cDNA pair from another run is rejected by validation or can create an invalid coordinate model.
+Always use all three artifacts from the same successful run. Mixing a graph package with a GFF3/cDNA pair from another run is rejected by validation or can create an invalid coordinate model.
 
 ## 7. Main Output Files
 
@@ -352,9 +357,9 @@ Always use all three artifacts from the same successful run. Mixing a graph pack
 | --- | --- |
 | `<prefix>_pre.tmp.cluster` | Intermediate graph-derived clusters |
 | `<prefix>_last.tmp.cluster` | Final chromosome-aware clusters |
-| `<prefix>_pre.gtf` | Pre-cluster transcript models with original IDs |
-| `<prefix>_unrenamed.gtf` | Final transcript models with original representative IDs |
-| `<prefix>.gtf` | Final transcript models with official `Pan...` IDs |
+| `<prefix>_pre.gff3` | Pre-cluster transcript models with original IDs |
+| `<prefix>_unrenamed.gff3` | Final transcript models with original representative IDs |
+| `<prefix>.gff3` | Final transcript models with official `Pan...` IDs |
 | `<prefix>_unrenamed_cdna.refer.fasta` | Chaining cDNA for a later append |
 | `<prefix>_cdna.refer.fasta` | Official final cDNA |
 | `<prefix>_gdna.refer.fasta` | Final representative gene sequences |
@@ -365,12 +370,12 @@ Always use all three artifacts from the same successful run. Mixing a graph pack
 
 ## 8. Failure and Resume Behavior
 
-- Source identity, provenance, ID, GTF/cDNA, and BED validation errors stop append before alignment.
+- Source identity, provenance, ID, GFF3/cDNA, and BED validation errors stop append before alignment.
 - A failed cross-alignment can be resumed with its raw BAM option.
 - Reused BAMs are always re-filtered by the current PanTrans run.
 - Already PanTrans-filtered BAMs are rejected as resume inputs because the raw alignment records and provenance are required.
 - Missing current transcript models are recovered from `pre` output or targeted rescue alignment only when `--rescue` is specified; otherwise they remain absent.
-- Historical GTF models whose representative is no longer current are skipped, not projected.
+- Historical GFF3 models whose representative is no longer current are skipped, not projected.
 
 ## 9. Expected Equivalence and Non-Goals
 
@@ -381,7 +386,7 @@ The minimap2 `-N 100` limit means separately evaluated target sets can retain a 
 PanTrans does not currently:
 
 - recompute all original historical cDNA alignments during append;
-- project historical GTF coordinates onto a different representative gene;
+- project historical GFF3 coordinates onto a different representative gene;
 - guarantee byte-identical incremental and monolithic graphs or clusters;
 - treat a representative-only historical sequence set as a replacement for the complete historical graph.
 
@@ -407,4 +412,4 @@ anchoring. The implementation is `src/pantrans/translocation.py`.
 | Alignment, filtering, BAM merge, provenance | `src/pantrans/align_filter.py` |
 | Directed graph clustering | `src/pantrans/construct_di_graph.py` |
 | Graph package persistence and validation | `src/pantrans/graph_package.py` |
-| GTF parsing, transcript deduplication, renaming, cDNA extraction | `src/pantrans/transcript_processor.py` |
+| GFF3 parsing, transcript deduplication, renaming, cDNA extraction | `src/pantrans/transcript_processor.py` |

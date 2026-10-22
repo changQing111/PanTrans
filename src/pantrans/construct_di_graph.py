@@ -1,5 +1,10 @@
+import logging
+from time import perf_counter
+
 import networkx as nx
 from .assign_cluster_gene import MAIN_CHROMS, assign_gene_by_chrom
+
+logger = logging.getLogger(__name__)
 
 def calculate_in_degree_in_scc(graph, scc):
     """计算SCC中节点的内部入度（仅来自SCC内部的边）"""
@@ -42,92 +47,72 @@ def unit_recursion(
     G, node_li, gene_len_dic, refer_name, refer_prefixes=None, gene_variety_dic=None,
     bed_dic=None, main_chroms=None,
 ):
-    """分组：挑选代表节点并输出与其双向连接的簇（迭代实现）
+    """Split a component, maintaining induced in-degrees as genes are removed.
 
-    Args:
-        G: 有向图
-        node_li: 节点列表
-        gene_len_dic: 基因长度字典
-        refer_name: 参考基因组名称
+    Representative tie-breaking and output ordering match the full-scan version.
+    Input nodes are unique gene IDs, as supplied by SCC and chromosome grouping.
     """
-    if not node_li:
-        return []
-
-    results = []
-
-    # 确保节点都在图中；无效节点直接作为单节点簇输出
-    valid_nodes = sorted(node for node in node_li if node in G)
-    invalid_nodes = sorted(node for node in node_li if node not in G)
-    results.extend([[node] for node in invalid_nodes])
-
-    pending = list(valid_nodes)
+    results = [[node] for node in sorted(node for node in node_li if node not in G)]
+    pending = {node for node in node_li if node in G}
     if not pending:
         return results
+    if len(pending) == 1:
+        results.append([next(iter(pending))])
+        return results
+
+    if bed_dic is None:
+        eligible = pending.copy()
+    else:
+        from .assign_cluster_gene import build_main_chrom_order
+        main_chrom_set = set(build_main_chrom_order(main_chroms))
+        eligible = {node for node in pending
+                    if bed_dic.get(node, (None,))[0] in main_chrom_set}
+
+    # Count every edge within the initial component once. Removing a source
+    # changes only the in-degrees of its still-pending successors.
+    degrees = {node: 0 for node in pending}
+    if eligible:
+        for node in pending:
+            for target in G.successors(node):
+                if target in pending:
+                    degrees[target] += 1
 
     while pending:
         if len(pending) == 1:
-            results.append([pending[0]])
+            results.append([next(iter(pending))])
             break
-
-        eligible_representatives = pending
-        if len(pending) > 1 and bed_dic is not None:
-            main_chrom_set = set(main_chroms or MAIN_CHROMS)
-            if main_chroms:
-                from .assign_cluster_gene import build_main_chrom_order
-                main_chrom_set = set(build_main_chrom_order(main_chroms))
-            eligible_representatives = [
-                node for node in pending
-                if bed_dic.get(node, (None,))[0] in main_chrom_set
-            ]
-            if not eligible_representatives:
-                for node in pending:
-                    compatible = [
-                        index
-                        for index, cluster in enumerate(results)
-                        if cluster and any(is_bidirectionally_connected(G, node, member) for member in cluster)
-                    ]
-                    if compatible:
-                        results[compatible[0]].append(node)
-                    else:
-                        results.append([node])
-                break
-        node_degree_dic = calculate_in_degree_in_scc(G, set(pending))
-        if len(pending) > 1 and bed_dic is not None:
-            node_degree_dic = {
-                node: degree for node, degree in node_degree_dic.items()
-                if node in eligible_representatives
-            }
-        if not node_degree_dic:
-            # 无法计算入度时，将剩余节点全部作为单节点簇输出
-            results.extend([[node] for node in sorted(pending)])
+        if not eligible:
+            # Preserve the first-compatible-cluster rule, including attachments
+            # to contigs processed earlier in this loop.
+            gene_to_cluster = {gene: i for i, cluster in enumerate(results) for gene in cluster}
+            for node in sorted(pending):
+                targets = [gene_to_cluster[member] for member in G.successors(node)
+                           if member in gene_to_cluster and G.has_edge(member, node)]
+                if targets:
+                    index = min(targets)
+                    results[index].append(node)
+                else:
+                    index = len(results)
+                    results.append([node])
+                gene_to_cluster[node] = index
             break
 
         max_node = find_max_in_degree_nodes(
-            node_degree_dic,
-            gene_len_dic,
-            refer_name,
-            refer_prefixes=refer_prefixes,
-            gene_variety_dic=gene_variety_dic,
+            {node: degrees[node] for node in eligible}, gene_len_dic, refer_name,
+            refer_prefixes=refer_prefixes, gene_variety_dic=gene_variety_dic,
         )
-        if max_node not in pending:
-            # 理论上不应发生，作为兜底：将剩余节点全部作为单节点簇输出
-            results.extend([[node] for node in sorted(pending)])
-            break
-
-        di_node_li = [max_node]
-        non_node_li = []
-        for node in sorted(pending):
-            if node == max_node:
-                continue
-            if is_bidirectionally_connected(G, max_node, node):
-                di_node_li.append(node)
-            else:
-                non_node_li.append(node)
-
-        results.append(di_node_li)
-        pending = sorted(non_node_li)
-
+        members = sorted(node for node in G.successors(max_node)
+                         if node != max_node and node in pending and G.has_edge(node, max_node))
+        cluster = [max_node] + members
+        results.append(cluster)
+        pending.difference_update(cluster)
+        eligible.difference_update(cluster)
+        for node in cluster:
+            for target in G.successors(node):
+                if target in pending:
+                    degrees[target] -= 1
     return results
+
 
 def di_graph_from_pair(gene_pair_li):
     G = nx.DiGraph()
@@ -167,41 +152,64 @@ def _cluster_gene_set(clusters):
 
 def _attach_reciprocal_contig_singletons(clusters, graph, bed_dic, main_chroms, gene_variety_dic):
     """Attach singleton unplaced genes to any cluster with direct reciprocal support."""
+    started = perf_counter()
+    logger.info("Start reciprocal contig singleton attachment: %d clusters", len(clusters))
     main_chrom_set = set(main_chroms or MAIN_CHROMS)
     if main_chroms:
         from .assign_cluster_gene import build_main_chrom_order
         main_chrom_set = set(build_main_chrom_order(main_chroms))
+    # Clusters partition the genes. Keep stable cluster indexes while moving
+    # genes so later singletons see the same state as the sequential full scan.
+    gene_to_cluster = {
+        gene: index for index, cluster in enumerate(clusters) for gene in cluster
+    }
+    examined = attached = 0
     for source_index, source_cluster in enumerate(clusters):
         if len(source_cluster) != 1:
             continue
         gene = source_cluster[0]
         if bed_dic.get(gene, (None,))[0] in main_chrom_set:
             continue
-        candidates = []
-        for target_index, target_cluster in enumerate(clusters):
-            if target_index == source_index or not target_cluster:
+        examined += 1
+        if gene not in graph:
+            continue
+        same_variety_by_cluster = {}
+        for member in graph.successors(gene):
+            if not graph.has_edge(member, gene):
                 continue
-            linked = [
-                member for member in target_cluster
-                if is_bidirectionally_connected(graph, gene, member)
-            ]
-            if linked:
-                same_variety = any(
-                    gene_variety_dic.get(member) == gene_variety_dic.get(gene)
-                    for member in linked
-                ) if gene_variety_dic else False
-                candidates.append((not same_variety, len(target_cluster), target_index))
-        if candidates:
-            target_index = min(candidates)[2]
+            target_index = gene_to_cluster.get(member)
+            if target_index is None or target_index == source_index:
+                continue
+            same_variety = (
+                gene_variety_dic.get(member) == gene_variety_dic.get(gene)
+            ) if gene_variety_dic else False
+            same_variety_by_cluster[target_index] = (
+                same_variety_by_cluster.get(target_index, False) or same_variety
+            )
+        if same_variety_by_cluster:
+            target_index = min(
+                (not same_variety, len(clusters[index]), index)
+                for index, same_variety in same_variety_by_cluster.items()
+            )[2]
             clusters[target_index].append(gene)
             clusters[source_index] = []
-    return [cluster for cluster in clusters if cluster]
+            gene_to_cluster[gene] = target_index
+            attached += 1
+    result = [cluster for cluster in clusters if cluster]
+    logger.info(
+        "Finish reciprocal contig singleton attachment in %.3f s: "
+        "examined %d, attached %d, remaining clusters %d",
+        perf_counter() - started, examined, attached, len(result),
+    )
+    return result
 
 
 def derive_last_clusters_from_pre(
     pre_clusters, G, gene_len_dic, bed_dic, variety_li, refer_name,
     main_chroms=None, refer_prefixes=None, gene_variety_dic=None,
 ):
+    started = perf_counter()
+    logger.info("Start chromosome assignment and last-cluster splitting")
     last_clusters = []
     for cluster in pre_clusters:
         cluster = list(cluster)
@@ -244,6 +252,10 @@ def derive_last_clusters_from_pre(
         last_clusters.extend(
             _attach_missing_cluster_members(derived_clusters, omitted_genes, cluster[0])
         )
+    logger.info(
+        "Finish chromosome assignment and last-cluster splitting in %.3f s: %d clusters",
+        perf_counter() - started, len(last_clusters),
+    )
     return _attach_reciprocal_contig_singletons(
         last_clusters, G, bed_dic, main_chroms, gene_variety_dic or {}
     )
@@ -253,6 +265,8 @@ def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chr
     Split strongly connected components into final clusters by recursively
     resolving graph structure and assigning genes by chromosome.
     """
+    started = perf_counter()
+    logger.info("Start SCC splitting into pre-clusters")
     pre_cluster = []
     for scc in sccs:
         li = list(scc)
@@ -270,6 +284,10 @@ def assign_sccs(sccs, G, gene_len_dic, bed_dic, variety_li, refer_name, main_chr
                 main_chroms=main_chroms,
             )
             pre_cluster.extend(clusters)
+    logger.info(
+        "Finish SCC splitting into pre-clusters in %.3f s: %d clusters",
+        perf_counter() - started, len(pre_cluster),
+    )
     last_clusters = derive_last_clusters_from_pre(
         pre_cluster, G, gene_len_dic, bed_dic, variety_li, refer_name,
         main_chroms=main_chroms,

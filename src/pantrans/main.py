@@ -51,7 +51,7 @@ def read_parameters(argv=None):
     construct_parser.add_argument(
         "--rescue",
         action="store_true",
-        help="rescue cluster representatives missing from the generated GTF",
+        help="rescue cluster representatives missing from the generated GFF3",
     )
     construct_parser.add_argument(
         "-r", "--reference", required=True, help="reference name"
@@ -78,9 +78,9 @@ def read_parameters(argv=None):
         help="previous unrenamed final cDNA sequences path",
     )
     append_parser.add_argument(
-        "--history-gtf",
+        "--history-gff3", "--history-gtf",
         required=True,
-        help="previous unrenamed final GTF path",
+        help="previous unrenamed final GFF3 (legacy GTF also accepted; --history-gtf is a compatibility alias)",
     )
     append_parser.add_argument(
         "--query-cdna",
@@ -107,7 +107,7 @@ def read_parameters(argv=None):
     append_parser.add_argument(
         "--rescue",
         action="store_true",
-        help="rescue cluster representatives missing from the generated GTF",
+        help="rescue cluster representatives missing from the generated GFF3",
     )
     append_parser.add_argument(
         "-p", "--prefix", default="Append", help="output prefix"
@@ -128,6 +128,12 @@ def read_parameters(argv=None):
     append_parser.add_argument(
         "-o", "--output", required=True, help="output dir"
     )
+
+    for coding_parser in (construct_parser, append_parser):
+        coding_parser.add_argument("--transdecoder-parallel", action="store_true", help="parallelize CDS scoring using -t CPUs (default: serial); requires CDS annotation")
+        coding_parser.add_argument("--annotate-cds", action="store_true", help="predict CDS and UTR features in final GFF3s using TransDecoder")
+        coding_parser.add_argument("--transdecoder-dir", help="TransDecoder executable directory (default: search PATH); implies --annotate-cds")
+        coding_parser.add_argument("--min-orf-length", type=int, default=50, help="minimum candidate ORF length in amino acids (default: 50)")
 
     cnv_parser = subparsers.add_parser(
         "cnv", help="Screen pre clusters for nearby same-variety gene copies"
@@ -154,6 +160,12 @@ def read_parameters(argv=None):
     translocation_parser.add_argument("--include-unplaced", action="store_true", help="include pairs with unplaced genes in reports and ambiguity counts (never as block anchors)")
 
     args = parser.parse_args(argv)
+    if args.subcommand in ("construct", "append"):
+        if args.threads < 1:
+            parser.error("--threads must be positive")
+        if args.min_orf_length < 1:
+            parser.error("--min-orf-length must be positive")
+        args.annotate_cds = args.annotate_cds or bool(args.transdecoder_dir)
     if args.subcommand == "cnv" and args.max_gap < 0:
         cnv_parser.error("--max-gap must be nonnegative")
     if args.subcommand == "translocation":
@@ -177,6 +189,10 @@ def main():
             bam_path=args.bam,
             main_chrom_path=args.main_chroms,
             rescue=args.rescue,
+            annotate_cds=args.annotate_cds,
+            transdecoder_dir=args.transdecoder_dir,
+            min_orf_length=args.min_orf_length,
+            transdecoder_parallel=args.transdecoder_parallel,
             threads=args.threads, 
             out_dir=args.output, 
             prefix=args.prefix, 
@@ -187,12 +203,16 @@ def main():
     elif args.subcommand == "append":
         unit_append(
             history_cdna_path=args.cdna,
-            history_gtf_path=args.history_gtf,
+            history_gff3_path=args.history_gff3,
             query_cdna_path=args.query_cdna,
             query_gdna_path=args.gdna,
             all_bed_path=args.bed,
             history_graph_path=args.history_graph,
             rescue=args.rescue,
+            annotate_cds=args.annotate_cds,
+            transdecoder_dir=args.transdecoder_dir,
+            min_orf_length=args.min_orf_length,
+            transdecoder_parallel=args.transdecoder_parallel,
             threads=args.threads,
             out_dir=args.output,
             prefix=args.prefix,

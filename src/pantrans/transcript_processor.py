@@ -3,10 +3,10 @@ import Bio.SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 import logging
-import os
-import re
 
 from .align_filter import transcript_to_gene_id
+from .gff3 import (load_gff3_transcript_models, load_history_transcript_models,
+                   make_row, write_gff3, rename_gff3_ids, sort_gff3_by_gene_id)
 
 
 logger = logging.getLogger(__name__)
@@ -57,246 +57,7 @@ def _extract_exon_and_splice(read):
 
     return splice_site_li, exon_coord_li
 
-def _parse_gtf_attributes(attrs):
-    parsed = {}
-    for item in attrs.strip().split(";"):
-        item = item.strip()
-        if not item or " " not in item:
-            continue
-        key, value = item.replace('"', "").split(" ", 1)
-        parsed[key] = value
-    return parsed
-
-
-def load_gtf_transcript_models(gtf_path):
-    """Load validated transcript exon and splice models from an unrenamed GTF."""
-    transcript_gene = {}
-    transcript_context = {}
-    exon_coords = {}
-    transcript_features = set()
-
-    with open(gtf_path, "rt") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            stripped = line.rstrip("\n")
-            if not stripped or stripped.startswith("#"):
-                continue
-
-            fields = stripped.split("\t")
-            if len(fields) != 9:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: expected 9 tab-separated GTF fields"
-                )
-
-            sequence_name, _, feature, start, end, _, strand, _, attr_text = fields
-            if feature not in ("transcript", "exon"):
-                continue
-
-            attrs = _parse_gtf_attributes(attr_text)
-            missing_attrs = [
-                key for key in ("gene_id", "transcript_id") if not attrs.get(key)
-            ]
-            if missing_attrs:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: {feature} is missing "
-                    + ", ".join(missing_attrs)
-                )
-
-            gene_id = attrs["gene_id"]
-            transcript_id = attrs["transcript_id"]
-            if sequence_name != gene_id:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: sequence name {sequence_name!r} "
-                    f"does not match gene_id {gene_id!r}"
-                )
-            derived_gene_id = transcript_to_gene_id(transcript_id)
-            if derived_gene_id != gene_id:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: transcript_id {transcript_id!r} "
-                    f"maps to gene {derived_gene_id!r}, but gene_id is {gene_id!r}"
-                )
-
-            try:
-                start_i = int(start)
-                end_i = int(end)
-            except ValueError as exc:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: invalid {feature} coordinates "
-                    f"{start!r}-{end!r}"
-                ) from exc
-            if start_i < 1 or end_i < start_i:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: invalid {feature} coordinates "
-                    f"{start_i}-{end_i}"
-                )
-
-            context = (sequence_name, strand)
-            previous_context = transcript_context.setdefault(transcript_id, context)
-            previous_gene = transcript_gene.setdefault(transcript_id, gene_id)
-            if previous_context != context or previous_gene != gene_id:
-                raise ValueError(
-                    f"{gtf_path}:{line_number}: transcript {transcript_id!r} has "
-                    "mixed sequence names or strands"
-                )
-
-            if feature == "exon":
-                exon_coords.setdefault(transcript_id, []).append((start_i, end_i))
-            else:
-                transcript_features.add(transcript_id)
-
-    missing_transcript_features = sorted(set(transcript_gene) - transcript_features)
-    if missing_transcript_features:
-        raise ValueError(
-            f"{gtf_path}: transcript {missing_transcript_features[0]!r} has no "
-            "transcript feature"
-        )
-
-    splice_sites = {}
-    sorted_exon_coords = {}
-    for transcript_id in transcript_gene:
-        coords = sorted(exon_coords.get(transcript_id, []))
-        if not coords:
-            raise ValueError(
-                f"{gtf_path}: transcript {transcript_id!r} has no exon records"
-            )
-
-        transcript_splice_sites = []
-        for previous_exon, next_exon in zip(coords, coords[1:]):
-            if next_exon[0] <= previous_exon[1] + 1:
-                raise ValueError(
-                    f"{gtf_path}: transcript {transcript_id!r} has overlapping "
-                    "or adjacent exons"
-                )
-            transcript_splice_sites.append(
-                (previous_exon[1] + 1, next_exon[0] - 1)
-            )
-
-        sorted_exon_coords[transcript_id] = coords
-        splice_sites[transcript_id] = transcript_splice_sites
-
-    return {
-        "transcript_gene": transcript_gene,
-        "splice_sites": splice_sites,
-        "exon_coords": sorted_exon_coords,
-    }
-
-
-def _replace_gtf_attribute_values(attr_text, replacements):
-    rewritten = []
-    seen = set()
-    for raw_item in attr_text.strip().split(";"):
-        item = raw_item.strip()
-        if not item:
-            continue
-        if " " not in item:
-            raise ValueError(f"Malformed GTF attribute {item!r}")
-        key, _ = item.split(None, 1)
-        if key in replacements:
-            item = f'{key} "{replacements[key]}"'
-            seen.add(key)
-        rewritten.append(item)
-    missing = sorted(set(replacements) - seen)
-    if missing:
-        raise ValueError("GTF record is missing " + ", ".join(missing))
-    return "; ".join(rewritten) + ";"
-
-
-def rename_gtf_ids(source_path, output_path, rename_map):
-    """Rename GTF gene/transcript attributes while keeping source coordinates."""
-    output_path = str(output_path)
-    temporary_path = output_path + ".tmp"
-    try:
-        with open(source_path, "rt") as source, open(temporary_path, "wt") as output:
-            for line_number, line in enumerate(source, start=1):
-                stripped = line.rstrip("\n")
-                if not stripped or stripped.startswith("#"):
-                    output.write(line)
-                    continue
-
-                fields = stripped.split("\t")
-                if len(fields) != 9:
-                    raise ValueError(
-                        f"{source_path}:{line_number}: expected 9 tab-separated GTF fields"
-                    )
-                attrs = _parse_gtf_attributes(fields[8])
-                gene_id = attrs.get("gene_id")
-                transcript_id = attrs.get("transcript_id")
-                if not gene_id or not transcript_id:
-                    raise ValueError(
-                        f"{source_path}:{line_number}: record is missing gene_id or transcript_id"
-                    )
-                if fields[0] != gene_id:
-                    raise ValueError(
-                        f"{source_path}:{line_number}: sequence name {fields[0]!r} "
-                        f"does not match gene_id {gene_id!r}"
-                    )
-                prefix, separator, suffix = transcript_id.rpartition(".")
-                if not separator or prefix != gene_id or not suffix.isdigit():
-                    raise ValueError(
-                        f"{source_path}:{line_number}: transcript_id {transcript_id!r} "
-                        f"must use gene_id {gene_id!r} plus a numeric suffix"
-                    )
-                if gene_id not in rename_map:
-                    raise ValueError(
-                        f"{source_path}:{line_number}: no renamed ID for gene {gene_id!r}"
-                    )
-
-                renamed_gene = rename_map[gene_id]
-                fields[8] = _replace_gtf_attribute_values(
-                    fields[8],
-                    {
-                        "gene_id": renamed_gene,
-                        "transcript_id": f"{renamed_gene}.{suffix}",
-                    },
-                )
-                output.write("\t".join(fields) + "\n")
-        os.replace(temporary_path, output_path)
-    except Exception:
-        if os.path.exists(temporary_path):
-            os.unlink(temporary_path)
-        raise
-
-def _pan_gene_sort_key(gene_id):
-    if not gene_id.startswith("Pan"):
-        return (999, 999, gene_id, 999999999)
-    core = gene_id[3:]
-    contig_match = re.match(r"^Ctg(\d+)$", core)
-    if contig_match:
-        return (999, 999, "Ctg", int(contig_match.group(1)))
-    chrom_match = re.match(r"^(\d+)([ABD])(\d+)$", core)
-    if chrom_match:
-        chrom_num = int(chrom_match.group(1))
-        subgenome = {"A": 0, "B": 1, "D": 2}[chrom_match.group(2)]
-        order_num = int(chrom_match.group(3))
-        return (chrom_num, subgenome, chrom_match.group(2), order_num)
-    return (999, 999, core, 999999999)
-
-def sort_gtf_by_gene_id(gtf_path):
-    """按 Pan gene_id 顺序重排 GTF。"""
-    records = []
-    with open(gtf_path, "rt") as handle:
-        for line in handle:
-            stripped = line.rstrip("\n")
-            if not stripped:
-                continue
-            fields = stripped.split("\t")
-            if len(fields) != 9:
-                records.append(((999, 999, "misc", 999999999), 999, 999999999, 999999999, stripped))
-                continue
-            attrs = _parse_gtf_attributes(fields[8])
-            gene_id = attrs.get("gene_id", fields[0])
-            transcript_id = attrs.get("transcript_id", "")
-            transcript_index = int(transcript_id.rsplit(".", 1)[1]) if "." in transcript_id and transcript_id.rsplit(".", 1)[1].isdigit() else 1
-            feature_order = 0 if fields[2] == "transcript" else 1
-            start_i = int(fields[3]) if fields[3].isdigit() else 0
-            end_i = int(fields[4]) if fields[4].isdigit() else 0
-            records.append((_pan_gene_sort_key(gene_id), transcript_index, feature_order, start_i, end_i, stripped))
-    records.sort(key=lambda item: item[:-1])
-    with open(gtf_path, "w") as handle:
-        for record in records:
-            handle.write(record[-1] + "\n")
-
-
-def extract_exon_coord_splice_site(bam_path, cluster_dic):
+def extract_exon_coord_splice_site(bam_path, cluster_dic, include_strands=False):
     """
     提取转录本的剪切位点和外显子坐标信息
     Args:
@@ -329,17 +90,19 @@ def extract_exon_coord_splice_site(bam_path, cluster_dic):
             continue
         rank = _alignment_rank(read)
         if query not in best_alignment_dic or rank > best_alignment_dic[query][0]:
-            best_alignment_dic[query] = (rank, splice_site_li, exon_coord_li)
+            best_alignment_dic[query] = (rank, splice_site_li, exon_coord_li, "-" if read.is_reverse else "+")
 
     bam.close()
     trans_splice_site_dic = {
         query: splice_site_li
-        for query, (_, splice_site_li, _) in best_alignment_dic.items()
+        for query, (_, splice_site_li, _, _) in best_alignment_dic.items()
     }
     exon_coord_dic = {
         query: exon_coord_li
-        for query, (_, _, exon_coord_li) in best_alignment_dic.items()
+        for query, (_, _, exon_coord_li, _) in best_alignment_dic.items()
     }
+    if include_strands:
+        return trans_splice_site_dic, exon_coord_dic, {q: value[3] for q, value in best_alignment_dic.items()}
     return trans_splice_site_dic, exon_coord_dic
 
 def group_by_longest_superstring(orig: dict) -> dict:
@@ -374,7 +137,7 @@ def group_by_longest_superstring(orig: dict) -> dict:
 
     return result
 
-def dedup_ss(splice_site_dic, trans_li):
+def dedup_ss(splice_site_dic, trans_li, transcript_strands=None):
     """根据剪切位点对转录本进行去重"""
     trans_intron_coord_dic = {}
     for trans in trans_li:
@@ -392,10 +155,17 @@ def dedup_ss(splice_site_dic, trans_li):
                 tmp = str(coord[0]) + "-" + str(coord[1])
                 coord_str = coord_str + ":" + tmp
         trans_intron_coord_dic[trans] = coord_str
-    ss_dic = group_by_longest_superstring(trans_intron_coord_dic)
-    return ss_dic
+    if transcript_strands is None:
+        return group_by_longest_superstring(trans_intron_coord_dic)
+    groups = {}
+    for strand in ("+", "-"):
+        subset = {t: pattern for t, pattern in trans_intron_coord_dic.items()
+                  if transcript_strands[t] == strand}
+        for pattern, members in group_by_longest_superstring(subset).items():
+            groups[(strand, pattern)] = members
+    return groups
 
-def get_last_trans(splice_site_dic, cluster_dic, gene_trans_dic):
+def get_last_trans(splice_site_dic, cluster_dic, gene_trans_dic, transcript_strands=None):
     '''out gene transcript map'''
     # Abo6B402900.1 [(2229, 2339), (2404, 2486), (3760, 3842), (4548, 5809)]
     gene_ss_dic = {}
@@ -404,68 +174,43 @@ def get_last_trans(splice_site_dic, cluster_dic, gene_trans_dic):
         for i in gene_li:
             if i in gene_trans_dic:
                 trans_li += gene_trans_dic[i] # [.1, .2]
-        gene_ss_dic[gene] = dedup_ss(splice_site_dic, trans_li)
+        gene_ss_dic[gene] = dedup_ss(splice_site_dic, trans_li, transcript_strands)
     return gene_ss_dic
 
 # JM471A001600 {'2811-2915:2957-3221:3289-3367:3410-3511:3543-3922:4093-4222:4400-4493:4691-4780:4989-5086': ['JM471A001600.1', 'ZM22Ctg10006500.1'], '2811-2915:2957-3221:3289-3367:3410-3511:3543-3922:4093-4222': ['Abo1A000300.1']}
-def generate_gtf(gene_splice_site_dic, exon_coord_dic, gene_len_dic, trans_len_dic, gene_strand_dic, rename_map, gtf_path):
-    """生成GTF文件，每个剪切位点模式选择最长的转录本作为代表"""
-    with open(gtf_path, "w") as gtf_file:
-        for gene_id, group_dic in gene_splice_site_dic.items():
-            if gene_id not in gene_strand_dic or gene_id not in gene_len_dic:
+def generate_gff3(gene_splice_site_dic, exon_coord_dic, gene_len_dic, trans_len_dic, gene_strand_dic, rename_map, gff3_path, transcript_strands=None):
+    """Write gene/mRNA/exon hierarchies for the longest model of each splice pattern."""
+    rows = []
+    for gene_id, groups in gene_splice_site_dic.items():
+        if gene_id not in gene_len_dic:
+            continue
+        length = gene_len_dic[gene_id]
+        output_gene = rename_map.get(gene_id, gene_id) if rename_map else gene_id
+        children = []
+        for index, candidates in enumerate(groups.values(), 1):
+            valid = [t for t in candidates if t in trans_len_dic and exon_coord_dic.get(t)]
+            if not valid:
                 continue
-            strand = gene_strand_dic[gene_id]
-            gene_len = gene_len_dic[gene_id]
-            output_gene_id = rename_map.get(gene_id, gene_id) if rename_map else gene_id
+            representative = max(valid, key=lambda t: trans_len_dic[t])
+            if transcript_strands is None or transcript_strands.get(representative) not in {"+", "-"}:
+                raise ValueError(f"Missing reference-relative strand for {representative}; BED strand is not a substitute")
+            strand = transcript_strands[representative]
+            exons = [(max(1, a), min(b, length)) for a, b in sorted(exon_coord_dic[representative])
+                     if min(b, length) >= max(1, a)]
+            if not exons:
+                continue
+            tid = f"{output_gene}.{index}"
+            children.append(make_row(gene_id, "mRNA", exons[0][0], exons[-1][1], strand, tid, output_gene))
+            for exon_index, (a, b) in enumerate(exons, 1):
+                children.append(make_row(gene_id, "exon", a, b, strand, f"{tid}.exon{exon_index}", tid))
+        if children:
+            strands = {row[6] for row in children}
+            strand = next(iter(strands)) if len(strands) == 1 else "."
+            rows.append(make_row(gene_id, "gene", min(int(r[3]) for r in children),
+                                 max(int(r[4]) for r in children), strand, output_gene))
+            rows.extend(children)
+    write_gff3(gff3_path, rows)
 
-            for index, trans_li in enumerate(group_dic.values(), start=1):
-                valid_trans = [
-                    trans
-                    for trans in trans_li
-                    if trans in trans_len_dic and trans in exon_coord_dic and exon_coord_dic[trans]
-                ]
-                if not valid_trans:
-                    continue
-
-                rep_trans = max(valid_trans, key=lambda trans_id: trans_len_dic[trans_id])
-                exon_coord_li = sorted(exon_coord_dic[rep_trans], key=lambda coord: coord[0])
-                trans_id = f"{output_gene_id}.{index}"
-                anno_col = f'transcript_id "{trans_id}"; gene_id "{output_gene_id}";'
-
-                start_i = max(1, exon_coord_li[0][0])
-                end_i = min(exon_coord_li[-1][1], gene_len)
-                if end_i < start_i:
-                    continue
-
-                gtf_trans_li = [
-                    gene_id,
-                    "Pan",
-                    "transcript",
-                    str(start_i),
-                    str(end_i),
-                    ".",
-                    strand,
-                    ".",
-                    anno_col,
-                ]
-                gtf_file.write("\t".join(gtf_trans_li) + "\n")
-                for exon_start, exon_end in exon_coord_li:
-                    exon_start = max(1, exon_start)
-                    exon_end = min(exon_end, gene_len)
-                    if exon_end < exon_start:
-                        continue
-                    gtf_exon_li = [
-                        gene_id,
-                        "Pan",
-                        "exon",
-                        str(exon_start),
-                        str(exon_end),
-                        ".",
-                        strand,
-                        ".",
-                        anno_col,
-                    ]
-                    gtf_file.write("\t".join(gtf_exon_li) + "\n")
 
 def get_gene_trans_dic(splice_site_dic):
     """从转录本剪切位点字典构建基因到转录本的映射"""
@@ -485,14 +230,17 @@ def transcript_dedup(
     gene_len_dic,
     gene_strand_dic,
     rename_map,
-    gtf_path,
-    seed_gtf_path=None,
+    gff3_path,
+    seed_gff3_path=None,
 ):
-    """基于剪切位点进行转录本去重并生成GTF文件"""
-    trans_splice_site_dic, exon_coord_dic = extract_exon_coord_splice_site(bam_path, cluster_dic)
+    """基于剪切位点进行转录本去重并生成GFF3文件"""
+    trans_splice_site_dic, exon_coord_dic, transcript_strands = extract_exon_coord_splice_site(
+        bam_path, cluster_dic, include_strands=True)
 
-    if seed_gtf_path is not None:
-        seed_models = load_gtf_transcript_models(seed_gtf_path)
+    if seed_gff3_path is not None:
+        seed_models = load_history_transcript_models(seed_gff3_path)
+        logger.warning("Historical annotation strands are reused relative to their FASTA. "
+                       "Regenerate histories produced before the strand fix; chromosome BED strands cannot correct them.")
         skipped_transcripts = [
             transcript_id
             for transcript_id, gene_id in seed_models["transcript_gene"].items()
@@ -506,7 +254,7 @@ def transcript_dedup(
         )
         if skipped_transcripts:
             logger.info(
-                "Skipped %d historical GTF transcript%s from %d non-current "
+                "Skipped %d historical GFF3 transcript%s from %d non-current "
                 "representative gene%s: %s",
                 len(skipped_transcripts),
                 "" if len(skipped_transcripts) == 1 else "s",
@@ -518,6 +266,10 @@ def transcript_dedup(
         for transcript_id, gene_id in seed_models["transcript_gene"].items():
             if gene_id not in cluster_dic:
                 continue
+            strand = seed_models["transcript_context"][transcript_id][1]
+            if strand not in {"+", "-"}:
+                raise ValueError(f"Unknown historical transcript strand: {transcript_id}")
+            transcript_strands[transcript_id] = strand
             trans_splice_site_dic[transcript_id] = seed_models["splice_sites"][
                 transcript_id
             ]
@@ -526,8 +278,8 @@ def transcript_dedup(
             ]
 
     gene_trans_dic = get_gene_trans_dic(trans_splice_site_dic)
-    gene_splice_site_dic = get_last_trans(trans_splice_site_dic, cluster_dic, gene_trans_dic)
-    generate_gtf(gene_splice_site_dic, exon_coord_dic, gene_len_dic, trans_len_dic, gene_strand_dic, rename_map, gtf_path)
+    gene_splice_site_dic = get_last_trans(trans_splice_site_dic, cluster_dic, gene_trans_dic, transcript_strands)
+    generate_gff3(gene_splice_site_dic, exon_coord_dic, gene_len_dic, trans_len_dic, gene_strand_dic, rename_map, gff3_path, transcript_strands)
 
 def get_subset_bed(gene_li, merge_bed_path, out_bed_path):
     merge_bed_dic = {}
@@ -541,68 +293,22 @@ def get_subset_bed(gene_li, merge_bed_path, out_bed_path):
                 out_bed.write(merge_bed_dic[i])
 
 
-def get_cdna_from_gtf(fasta_path, gtf_path, out_path):
-    """从GTF文件中提取 cDNA 序列并写入 FASTA。
-
-    Args:
-        fasta_path (str): 基因组 FASTA 文件路径
-        gtf_path (str): 注释 GTF 文件路径
-        out_path (str): 输出 cDNA FASTA 路径
-    Returns:
-        int: 写出的转录本条目数量
-    """
-    with open(fasta_path, "rt", encoding="utf-8") as fasta_handle:
-        genome = Bio.SeqIO.to_dict(Bio.SeqIO.parse(fasta_handle, "fasta"))
-
-    from collections import defaultdict
-    transcripts = defaultdict(list)  # transcript_id -> list[(chrom,start,end,strand)]
-
-    with open(gtf_path) as gtf:
-        for line in gtf:
-            if not line or line.startswith("#"):
-                continue
-            fields = line.rstrip("\n").split("\t")
-            if len(fields) != 9:
-                continue
-            chrom, _, feature, start, end, _, strand, _, attrs = fields
-            if feature != "exon":
-                continue
-
-            # 提取 transcript_id
-            kv = {}
-            for item in attrs.strip().split(";"):
-                if not item.strip():
-                    continue
-                if " " in item:
-                    k, v = item.strip().replace('"', "").split(" ", 1)
-                    kv[k] = v
-            tid = kv.get("transcript_id") or kv.get("transcriptId") or kv.get("transcript")
-            if not tid:
-                continue
-
-            start_i, end_i = int(start), int(end)
-            transcripts[tid].append((chrom, start_i, end_i, strand))
-
+def get_cdna_from_gff3(fasta_path, gff3_path, out_path):
+    """Extract spliced cDNA using Parent relationships and unchanged sequence IDs."""
+    genome = Bio.SeqIO.to_dict(Bio.SeqIO.parse(fasta_path, "fasta"))
+    models = load_gff3_transcript_models(gff3_path, require_unrenamed=False)
     records = []
-    for tid, exons in transcripts.items():
-        if not exons:
-            continue
-        strand = exons[0][3]
-        exons_sorted = sorted(exons, key=lambda x: x[1])
-
-        seq_parts = []
-        for chrom, s, e, _ in exons_sorted:
-            if chrom not in genome:
-                continue  # 跳过缺失的染色体
-            seq_parts.append(genome[chrom].seq[s - 1 : e])  # GTF 是 1-based 闭区间
-
-        if not seq_parts:
-            continue
-
-        cdna = Seq("").join(seq_parts)
+    for tid, exons in models["exon_coords"].items():
+        seqid, strand = models["transcript_context"][tid]
+        if strand not in {"+", "-"}:
+            raise ValueError(f"Cannot orient cDNA for {tid}: GFF3 strand must be + or -")
+        if seqid not in genome:
+            raise ValueError(f"GFF3 sequence {seqid} is missing from FASTA")
+        if any(end > len(genome[seqid]) for _, end in exons):
+            raise ValueError(f"GFF3 exon outside FASTA sequence for {tid}")
+        cdna = Seq("").join([genome[seqid].seq[a - 1:b] for a, b in exons])
         if strand == "-":
             cdna = cdna.reverse_complement()
         records.append(SeqRecord(cdna, id=tid, description="cDNA"))
-
     Bio.SeqIO.write(records, out_path, "fasta")
     return len(records)

@@ -110,12 +110,12 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
             "test_pantrans_cdna_align_gdna.filtered.bam", script
         )
         self.assertIn("history_manifest=", script)
-        self.assertIn("history_gtf=", script)
-        self.assertIn("_unrenamed.gtf", script)
+        self.assertIn("history_gff3=", script)
+        self.assertIn("_unrenamed.gff3", script)
         self.assertIn("history_cdna=", script)
         self.assertIn("_unrenamed_cdna.refer.fasta", script)
         self.assertIn('--cdna "${history_cdna}"', script)
-        self.assertIn('--history-gtf "${history_gtf}"', script)
+        self.assertIn('--history-gff3 "${history_gff3}"', script)
         self.assertIn("--query-cdna /data/changq/PanTrans/test/JM22_cdna.fasta", script)
         self.assertIn('--history-graph "${history_manifest}"', script)
         self.assertIn("test_pantrans_pre.refer_append_JM22.bed", script)
@@ -134,8 +134,8 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
         ) as handle:
             version_module = handle.read()
 
-        self.assertIn('version = "0.6.0"', pyproject)
-        self.assertIn('__version__ = "0.6.0"', version_module)
+        self.assertIn('version = "0.7.0"', pyproject)
+        self.assertIn('__version__ = "0.7.0"', version_module)
 
 
 if __name__ == "__main__":

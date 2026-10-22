@@ -8,7 +8,7 @@ PanTrans 是一个命令行工具，用于从多个品种构建多倍体生物�
 
 ## 功能
 
-**0.6.0** 新增候选易位筛选和独立可视化脚本。
+**0.7.0** 将所有新生成的注释统一为 GFF3，并支持 TransDecoder CDS/UTR 预测。
 
 - 用 `cnv` 筛选邻近基因拷贝，用 `translocation` 从 pre cluster 筛选候选染色体间位置差异
 
@@ -16,9 +16,9 @@ PanTrans 是一个命令行工具，用于从多个品种构建多倍体生物�
 - 使用 `construct --bam` 复用已有的 cDNA-to-gDNA BAM，跳过 `minimap2` 比对
 - 使用 `construct --main-chroms` 指定主染色体
 - 从 `construct` 结果保存可复用的完整有向图包
-- 生成 `pre` 和 `last` 两级结果，包括 `pre.tmp.cluster`、`last.tmp.cluster`、`pre.gtf`、`gtf`、参考 FASTA 和参考 BED
+- 生成 `pre` 和 `last` 两级结果，包括 `pre.tmp.cluster`、`last.tmp.cluster`、`pre.gff3`、`gff3`、参考 FASTA 和参考 BED
 - 使用 `append` 在已有参考集合中追加新品种
-- 在最终 GTF/cDNA 结果中同时保留原始代表 ID 和官方 `Pan...` ID
+- 在最终 GFF3/cDNA 结果中同时保留原始代表 ID 和官方 `Pan...` ID
 
 ## 易位结果可视化
 
@@ -63,6 +63,49 @@ PanTrans 依赖以下软件：
 
 ## 输入文件
 
+### 可选 CDS / UTR 注释
+
+所有新生成的注释（包括 pre、最终两套结果及 rescue 中间结果）均使用 `.gff3`。
+文件包含 `##gff-version 3`，使用 `gene → mRNA → exon/CDS/UTR` 层级及
+`ID`/`Parent` 属性；特殊字符按 GFF3 规则转义。正式 ID 版本重命名各层级 ID
+及其 Parent，但第 1 列仍为原始代表基因序列名，坐标仍对应配套 gDNA。
+append 使用 `--history-gff3`；该参数也能读取历史 GTF，旧参数 `--history-gtf`
+保留为兼容别名。旧结果文件不会自动转换或删除，新结果不再生成 GTF。
+`scripts/repair_official_ids.py` 现针对新的 `.gff3` 输出对进行修复。
+
+`construct` 和 `append` 支持 `--annotate-cds`，在最终转录本去冗余和 rescue
+完成后，用 TransDecoder 预测主要 ORF，并同时为 `<prefix>_unrenamed.gff3`
+和 `<prefix>.gff3` 添加 `CDS`、`five_prime_UTR`、`three_prime_UTR`，以及可确定的
+`start_codon` / `stop_codon`。不对 pre 结果运行预测。
+
+在原有命令后添加：
+
+```bash
+--annotate-cds --transdecoder-dir /path/to/TransDecoder --min-orf-length 50
+```
+
+- TransDecoder 在 `PATH` 中时可省略 `--transdecoder-dir`；单独指定该目录也会启用注释。
+- 支持经典 `TransDecoder.LongOrfs` + `TransDecoder.Predict` 和新版 `TransDecoder` 入口；需要可运行的 Linux/WSL 工具环境及其依赖。
+- 默认关闭注释；`--min-orf-length` 默认 50，单位为氨基酸，是候选 ORF 长度阈值。
+- TransDecoder 默认串行评分，不受 `-t` 影响；增加 `--transdecoder-parallel -t 8` 可使用最多 8 个评分进程，`-t 1` 保留原版串行流程。
+- 并行评分目前支持评分调用结构匹配的经典 TransDecoder 5.7.1；其他版本提示警告并回退串行。各分块共享同一训练模型，调用原版评分脚本，按输入顺序合并结果。LongOrfs、模型训练和后续预测仍串行执行。
+- 系统安装的 TransDecoder 不会被修改；本次运行目录保留专用 Predict 副本和各分块诊断日志。
+
+- 对最终未重命名 cDNA 仅运行一次，使用正义链预测和 `--single_best_only`，然后沿 exon 映射回原有代表基因序列坐标。正式 GFF3 由同一结果重命名得到。
+- GFF3 的 CDS 包含终止密码子，与 TransDecoder 一致；3′UTR 从终止密码子之后开始。跨外显子的 CDS 拆段、共享 ID 并计算 phase。可确定的起止密码子另加重叠特征，其 phase 为 `.`。
+- 不完整 ORF 只在已确定边界的一端添加 UTR；没有预测到 ORF 的转录本保留 transcript/exon，不直接判为非编码。
+- 每次运行保留 `<prefix>_transdecoder/run-*/` 中的日志及 TransDecoder 原始结果（含 GFF3、蛋白和 CDS FASTA，使用原始转录本/ORF ID），避免复用过期检查点。工具失败或结果不合法时明确报错。
+- append 在启用此选项时重新预测最终转录本；历史 GFF3 的 CDS/UTR 不直接继承。继续需要这些注释时，每次 append 均启用该选项。
+
+局部 GFF3 的转录本链方向来自所选 BAM 比对相对于输入 gDNA 的方向，而非染色体
+BED 第 6 列。cDNA 按 GFF3 的 `+` 正向拼接 exon，按 `-` 在拼接后反向互补；
+未知方向会报错。已按基因方向调整的 gDNA 不会因原始 BED 为负链而被重复反向互补。
+相反方向的模型分别去冗余；若一个基因包含两种方向，其 gene 行使用 `.`，mRNA
+及子特征保留各自方向。旧版输出的错误方向不会自动修复，需复用 BAM 重新生成
+注释和 cDNA，再重跑 TransDecoder；用于 append 的历史注释也应先修复。
+
+这些区段是基于 ORF 的预测，不是实验确认的翻译边界；当前使用标准遗传密码。
+
 PanTrans 使用以下类型的输入：
 
 - `cdna` FASTA：转录本序列
@@ -96,7 +139,7 @@ pantrans construct \
 - `--bam`：使用已有的 cDNA-to-gDNA BAM，跳过 `minimap2` 比对
 - `--main-chroms`：包含主染色体名称的文本文件，每行一个名称
 - `--threads`：minimap2 与 samtools 共享的线程预算
-- `--rescue`：显式启用对最终未生成 GTF 模型的簇代表基因进行恢复；默认关闭
+- `--rescue`：显式启用对最终未生成 GFF3 模型的簇代表基因进行恢复；默认关闭
 
 ### 示例
 
@@ -117,13 +160,13 @@ pantrans construct \
 
 - `test_pantrans_pre.tmp.cluster`
 - `test_pantrans_last.tmp.cluster`
-- `test_pantrans_pre.gtf`
+- `test_pantrans_pre.gff3`
 - `test_pantrans_pre_cdna.refer.fasta`
 - `test_pantrans_pre_gdna.refer.fasta`
 - `test_pantrans_pre.refer.bed`
-- `test_pantrans_unrenamed.gtf`
+- `test_pantrans_unrenamed.gff3`
 - `test_pantrans_unrenamed_cdna.refer.fasta`
-- `test_pantrans.gtf`
+- `test_pantrans.gff3`
 - `test_pantrans_cdna.refer.fasta`
 - `test_pantrans_gdna.refer.fasta`
 - `test_pantrans.refer.bed`
@@ -134,9 +177,9 @@ pantrans construct \
 
 ### 输出命名说明
 
-- `pre.gtf` 保留簇中心基因 ID 和转录本 ID。
-- `<prefix>_unrenamed.gtf` 与 `<prefix>_unrenamed_cdna.refer.fasta` 保留图、BED 和簇文件使用的最终 `last` 代表 ID。
-- `<prefix>.gtf` 与 `<prefix>_cdna.refer.fasta` 包含相同的最终转录本模型，但会将基因和转录本重命名为官方 `Pan...` ID，例如 `PanChr1A000001`。`Pan` 之后原样保留代表基因对应的 BED 染色体名称。
+- `pre.gff3` 保留簇中心基因 ID 和转录本 ID。
+- `<prefix>_unrenamed.gff3` 与 `<prefix>_unrenamed_cdna.refer.fasta` 保留图、BED 和簇文件使用的最终 `last` 代表 ID。
+- `<prefix>.gff3` 与 `<prefix>_cdna.refer.fasta` 包含相同的最终转录本模型，但会将基因和转录本重命名为官方 `Pan...` ID，例如 `PanChr1A000001`。`Pan` 之后原样保留代表基因对应的 BED 染色体名称。
 
 ### 从已有 Construct 结果导出图包
 
@@ -170,7 +213,7 @@ BAM 必须是生成历史簇时使用的过滤 BAM。其参考序列名称必须
 ```bash
 pantrans append \
   --cdna <previous_unrenamed_final_cdna.fasta> \
-  --history-gtf <previous_unrenamed_final.gtf> \
+  --history-gff3 <previous_unrenamed_final.gff3> \
   --query-cdna <new_variety_cdna.fasta> \
   --gdna <query_gdna.fasta> \
   --bed <combined_representatives_and_query.bed> \
@@ -182,19 +225,19 @@ pantrans append \
 三个转录本输入的作用不同：
 
 - `--cdna`：上一次运行生成的 `<prefix>_unrenamed_cdna.refer.fasta`
-- `--history-gtf`：与该 cDNA 配对的 `<prefix>_unrenamed.gtf`
+- `--history-gff3`：与该 cDNA 配对的 `<prefix>_unrenamed.gff3`
 - `--query-cdna`：新品种的完整 cDNA FASTA
 
-历史 GTF 和 cDNA 必须包含完全一致的转录本 ID。GTF 中的基因 ID 必须是历史图包中存在的未重命名 ID；如果传入官方 `Pan...` GTF，程序会拒绝。`--bed` 是一个合并 BED，包含历史 `pre.tmp.cluster` 中每个簇的第一个基因，以及新品种的全部基因。图包提供完整的历史 gDNA、BED、过滤 BAM、图边、节点长度、品种顺序、参考品种和比对来源信息。
+历史 GFF3 和 cDNA 必须包含完全一致的转录本 ID。GFF3 中的基因 ID 必须是历史图包中存在的未重命名 ID；如果传入官方 `Pan...` GFF3，程序会拒绝。`--bed` 是一个合并 BED，包含历史 `pre.tmp.cluster` 中每个簇的第一个基因，以及新品种的全部基因。图包提供完整的历史 gDNA、BED、过滤 BAM、图边、节点长度、品种顺序、参考品种和比对来源信息。
 
-为了支持断点续跑，`append` 还接受 `--query-to-all-bam` 和 `--history-to-query-bam`，用于复用已经完成的两类交叉比对 BAM。只有显式指定 `--rescue` 才会启用缺失 GTF 模型的恢复，默认不执行恢复。
+为了支持断点续跑，`append` 还接受 `--query-to-all-bam` 和 `--history-to-query-bam`，用于复用已经完成的两类交叉比对 BAM。只有显式指定 `--rescue` 才会启用缺失 GFF3 模型的恢复，默认不执行恢复。
 
 ### 示例
 
 ```bash
 pantrans append \
   --cdna test/pantrans_construct_out/test_pantrans_unrenamed_cdna.refer.fasta \
-  --history-gtf test/pantrans_construct_out/test_pantrans_unrenamed.gtf \
+  --history-gff3 test/pantrans_construct_out/test_pantrans_unrenamed.gff3 \
   --query-cdna test/JM22_cdna.fasta \
   --gdna test/JM22.gdna.fasta \
   --bed test/test_pantrans_pre.refer_append_JM22.bed \
@@ -214,14 +257,14 @@ pantrans append \
 4. 将历史非冗余 cDNA 比对到新品种 gDNA
 5. 复用历史图边，合并两类交叉比对结果及其过滤 BAM
 6. 完全沿用 construct 的聚类流程重新生成 `pre` 和 `last` 簇
-7. 对最终转录本去冗余使用历史 GTF 模型作为种子，但只使用其原始代表基因仍是当前 `last` 代表的模型
-8. 输出官方及未重命名的最终 GTF/cDNA，以及供下一次 append 使用的图包
+7. 对最终转录本去冗余使用历史 GFF3 模型作为种子，但只使用其原始代表基因仍是当前 `last` 代表的模型
+8. 输出官方及未重命名的最终 GFF3/cDNA，以及供下一次 append 使用的图包
 
-所有在序列中出现的历史基因和新基因都可以参与聚类。append 的 BED 是面向用户的“历史代表基因加查询基因”输入；完整历史 BED 和 gDNA 集合由历史图包提供，并在内部使用。只有当历史 GTF 模型的原始代表基因仍然是当前 `last` 簇代表时，才会复用其坐标；程序不会把转录本模型投影到另一个代表基因的坐标系上。
+所有在序列中出现的历史基因和新基因都可以参与聚类。append 的 BED 是面向用户的“历史代表基因加查询基因”输入；完整历史 BED 和 gDNA 集合由历史图包提供，并在内部使用。只有当历史 GFF3 模型的原始代表基因仍然是当前 `last` 簇代表时，才会复用其坐标；程序不会把转录本模型投影到另一个代表基因的坐标系上。
 
 两类交叉比对避免了重新计算历史 cDNA 对历史 gDNA 的比对。由于 `minimap2` 只保留有限数量的次级比对，增量图与一次性 construct 得到的图预计会高度相似，但不保证逐字节完全一致。
 
-如需继续追加下一个品种，请将本次 append 生成的图包，以及对应的 `_unrenamed.gtf` 和 `_unrenamed_cdna.refer.fasta` 作为下一次运行的历史输入。
+如需继续追加下一个品种，请将本次 append 生成的图包，以及对应的 `_unrenamed.gff3` 和 `_unrenamed_cdna.refer.fasta` 作为下一次运行的历史输入。
 
 如果 append 在任意交叉比对完成后失败，可以使用对应的 `--query-to-all-bam` 和/或 `--history-to-query-bam` 路径重新运行。BAM 必须包含 `minimap2` 的 `@PG` 记录，且版本和生成图边时使用的参数一致。PanTrans 还会将 BAM 中的主查询 ID 和序列摘要与当前 cDNA FASTA 对照，然后使用当前阈值重新过滤复用的 BAM。
 
@@ -324,12 +367,12 @@ pre cluster 中。图边 TSV 为无表头的两列 `source_gene`、`target_gene`
 
 - `pre.tmp.cluster`：图推导出的中间簇，在最终递归细分之前生成
 - `last.tmp.cluster`：递归细分和染色体感知分配后的最终簇列表
-- `pre.gtf`：在 `pre` 簇级别执行转录本去冗余的结果，使用原始簇中心基因 ID
-- `_unrenamed.gtf`：最终 `last` 转录本模型，使用原始代表 ID
-- `gtf`：在 `last` 簇级别执行转录本去冗余的结果，使用 `Pan...` 基因命名
+- `pre.gff3`：在 `pre` 簇级别执行转录本去冗余的结果，使用原始簇中心基因 ID
+- `_unrenamed.gff3`：最终 `last` 转录本模型，使用原始代表 ID
+- `gff3`：在 `last` 簇级别执行转录本去冗余的结果，使用 `Pan...` 基因命名
 - `*.refer.bed`：作为参考集合的簇中心基因 BED 条目
 - `*_gdna.refer.fasta`：簇中心基因的基因组序列
-- `*_cdna.refer.fasta`：根据生成的 GTF 重建的 cDNA 序列
+- `*_cdna.refer.fasta`：根据生成的 GFF3 重建的 cDNA 序列
 - `*_unrenamed_cdna.refer.fasta`：以原始代表转录本 ID 为序列名的最终 cDNA
 - `*.graph.json`：包含源文件身份和比对来源信息的图包清单
 - `*.graph.edges.tsv`：去重后的有向图边
@@ -347,3 +390,5 @@ pre cluster 中。图边 TSV 为无表头的两列 `source_gene`、`target_gene`
 ## 开发说明
 
 本项目仍在持续开发中。部分流程是逐步实现的，聚类、转录本恢复和 append 逻辑仍可能继续调整。
+
+对支持的 TransDecoder 5.7.1，串行和并行均使用运行目录中的确定性 ORF 选择脚本：保持原优先级，完全并列时选择字典序最小的 ORF ID。原先随机选中的并列 ORF 因而可能改变；不支持的安装会警告无法保证并列选择确定性。

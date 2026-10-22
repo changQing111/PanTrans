@@ -8,7 +8,7 @@ The current implementation builds gene-level relationship graphs from cDNA-to-gD
 
 ## Features
 
-Version **0.6.0** adds candidate translocation screening and standalone visualization.
+Version **0.7.0** switches all new annotations to GFF3 and supports TransDecoder CDS/UTR prediction.
 
 - Screen pre clusters for nearby gene copies with `cnv` and candidate chromosome changes with `translocation`
 
@@ -17,9 +17,9 @@ Version **0.6.0** adds candidate translocation screening and standalone visualiz
 - Control the definition of main chromosomes with `construct --main-chroms`
 - Persist a reusable complete directed graph package from `construct`
 - Produce both `pre` and `last` outputs:
-  `pre.tmp.cluster`, `last.tmp.cluster`, `pre.gtf`, `gtf`, reference FASTA files, and reference BED files
+  `pre.tmp.cluster`, `last.tmp.cluster`, `pre.gff3`, `gff3`, reference FASTA files, and reference BED files
 - Append new varieties to an existing reference set with `append`
-- Retain both original representative IDs and official `Pan...` IDs in final GTF/cDNA outputs
+- Retain both original representative IDs and official `Pan...` IDs in final GFF3/cDNA outputs
 
 ## Translocation visualization
 
@@ -63,6 +63,72 @@ PanTrans depends on:
 - `samtools`
 
 ## Input files
+
+### Optional CDS / UTR annotation
+
+All generated annotations, including pre, both final variants and rescue intermediates,
+now use `.gff3`. Files contain `##gff-version 3` and a gene → mRNA → exon/CDS/UTR
+hierarchy with escaped `ID`/`Parent` attributes. Official outputs rename IDs and
+Parent references at every level while retaining the original representative
+sequence name in column 1 and the same gene-relative coordinates.
+Append uses `--history-gff3`, which also reads legacy historical GTF;
+`--history-gtf` remains a compatibility alias. Existing files are not automatically
+converted or removed; new runs no longer generate GTF.
+`scripts/repair_official_ids.py` now repairs the new `.gff3` output pairs.
+
+Both `construct` and `append` accept `--annotate-cds`. After final transcript
+deduplication and rescue, TransDecoder predicts one primary ORF per transcript.
+PanTrans adds `CDS`, `five_prime_UTR`, `three_prime_UTR`, and supported
+`start_codon` / `stop_codon` features to both `<prefix>_unrenamed.gff3` and
+`<prefix>.gff3`. Pre-cluster outputs are not annotated.
+
+Add these options to an existing command:
+
+```bash
+--annotate-cds --transdecoder-dir /path/to/TransDecoder --min-orf-length 50
+```
+
+The executable directory is optional when TransDecoder is on `PATH`; specifying
+it also enables annotation. Classic `TransDecoder.LongOrfs` / `TransDecoder.Predict`
+and the newer `TransDecoder` wrapper are supported, with their dependencies in a
+working Linux/WSL environment. Annotation is disabled by default. The minimum
+candidate ORF length defaults to 50 amino acids.
+
+TransDecoder scoring remains serial by default, regardless of `-t`. Add
+`--transdecoder-parallel -t 8` to use up to eight scoring processes (`-t 1`
+keeps the original serial path). Parallel scoring currently supports classic
+TransDecoder 5.7.1 with the expected scoring command; other installations log a
+warning and fall back to serial execution. All chunks use the same trained model
+and original scorer, and scores are merged in input order. LongOrfs, training,
+and downstream prediction stay serial. The installed TransDecoder is not modified;
+a private Predict adapter and per-chunk diagnostics are retained in the run folder.
+
+
+Prediction runs once on final unrenamed cDNA, using sense-strand mode and
+`--single_best_only`. Coordinates are projected through exons onto the existing
+representative gene sequences, then official IDs are generated from the same GFF3.
+GFF3 CDS includes the stop codon, matching TransDecoder; the 3' UTR begins
+after it. Spliced CDS segments share one ID and have appropriate phase.
+Optional start/stop codon features overlap CDS and have phase `.`. Partial ORFs only
+receive UTRs at supported boundaries. Transcripts without predicted ORFs retain
+their transcript/exon models and are not automatically classified as noncoding.
+
+Logs and raw predictions (GFF3, peptide and CDS FASTA with original transcript/ORF
+IDs) are retained in a fresh `<prefix>_transdecoder/run-*/` directory on every run.
+Failures or invalid predictions raise errors instead of silently omitting annotation.
+Append recomputes predictions when enabled; historical CDS/UTR features are not
+inherited, so enable the option for each append that needs coding annotation.
+Transcript strands in local GFF3 come from the selected BAM alignment relative to
+the input gDNA, not chromosome BED column 6. cDNA extraction joins exons in coordinate
+order and reverse-complements only for GFF3 `-`; unknown transcript strands fail.
+Already oriented gDNA is therefore not reverse-complemented twice. Opposite-strand
+models are deduplicated separately; a gene containing both strands has gene strand
+`.` and explicitly stranded transcripts/children. Previously generated incorrect
+strands are not automatically repaired: reuse the BAM to regenerate annotations
+and cDNA, then rerun TransDecoder. Repair historical annotations before using append.
+
+These are ORF-based predictions using the standard genetic code, not experimentally
+confirmed translation boundaries.
 
 PanTrans expects the following input types:
 
@@ -126,7 +192,7 @@ pantrans construct \
 - `--bam`: use an existing cDNA-to-gDNA BAM file and skip the `minimap2` alignment step
 - `--main-chroms`: text file containing main chromosome names, one per line
 - `--threads`: thread budget shared by minimap2 and samtools
-- `--rescue`: explicitly enable rescue of cluster representatives missing from the generated GTF; disabled by default
+- `--rescue`: explicitly enable rescue of cluster representatives missing from the generated GFF3; disabled by default
 
 ### Example
 
@@ -147,13 +213,13 @@ Given `--prefix test_pantrans`, PanTrans writes:
 
 - `test_pantrans_pre.tmp.cluster`
 - `test_pantrans_last.tmp.cluster`
-- `test_pantrans_pre.gtf`
+- `test_pantrans_pre.gff3`
 - `test_pantrans_pre_cdna.refer.fasta`
 - `test_pantrans_pre_gdna.refer.fasta`
 - `test_pantrans_pre.refer.bed`
-- `test_pantrans_unrenamed.gtf`
+- `test_pantrans_unrenamed.gff3`
 - `test_pantrans_unrenamed_cdna.refer.fasta`
-- `test_pantrans.gtf`
+- `test_pantrans.gff3`
 - `test_pantrans_cdna.refer.fasta`
 - `test_pantrans_gdna.refer.fasta`
 - `test_pantrans.refer.bed`
@@ -164,10 +230,10 @@ Given `--prefix test_pantrans`, PanTrans writes:
 
 ### Notes on naming
 
-- `pre.gtf` preserves the original cluster hub gene IDs and transcript IDs.
-- `<prefix>_unrenamed.gtf` and `<prefix>_unrenamed_cdna.refer.fasta`
+- `pre.gff3` preserves the original cluster hub gene IDs and transcript IDs.
+- `<prefix>_unrenamed.gff3` and `<prefix>_unrenamed_cdna.refer.fasta`
   retain the final `last` representative IDs used by the graph, BED, and cluster files.
-- `<prefix>.gtf` and `<prefix>_cdna.refer.fasta` contain the same final
+- `<prefix>.gff3` and `<prefix>_cdna.refer.fasta` contain the same final
   transcript models renamed to official `Pan...` IDs such as `PanChr1A000001`.
   IDs preserve the representative gene's exact BED chromosome name after `Pan`.
 
@@ -209,7 +275,7 @@ Use `append` to reuse a historical construct graph and add only the new-to-histo
 ```bash
 pantrans append \
   --cdna <previous_unrenamed_final_cdna.fasta> \
-  --history-gtf <previous_unrenamed_final.gtf> \
+  --history-gff3 <previous_unrenamed_final.gff3> \
   --query-cdna <new_variety_cdna.fasta> \
   --gdna <query_gdna.fasta> \
   --bed <combined_representatives_and_query.bed> \
@@ -221,12 +287,12 @@ pantrans append \
 The three transcript inputs have distinct roles:
 
 - `--cdna` is the previous run's `<prefix>_unrenamed_cdna.refer.fasta`.
-- `--history-gtf` is its matching `<prefix>_unrenamed.gtf`.
+- `--history-gff3` is its matching `<prefix>_unrenamed.gff3`.
 - `--query-cdna` is the new variety's complete cDNA FASTA.
 
-The historical GTF and cDNA must contain exactly the same transcript IDs. Their
+The historical GFF3 and cDNA must contain exactly the same transcript IDs. Their
 gene IDs must be unrenamed IDs present in the historical graph package; passing
-the official `Pan...` GTF is rejected. `--bed` is one combined BED containing
+the official `Pan...` GFF3 is rejected. `--bed` is one combined BED containing
 the first gene ID from every historical `pre.tmp.cluster` plus every gene from
 the new variety. The graph package supplies complete historical gDNA, BED,
 filtered BAM, graph edges, node lengths, variety order, reference, and alignment
@@ -235,14 +301,14 @@ provenance.
 For restartability, append also accepts `--query-to-all-bam` and
 `--history-to-query-bam` to reuse either completed cross-alignment BAM.
 Pass `--rescue` to enable rescue of cluster representatives missing from the
-generated GTF; rescue is disabled by default.
+generated GFF3; rescue is disabled by default.
 
 ### Example
 
 ```bash
 pantrans append \
   --cdna test/pantrans_construct_out/test_pantrans_unrenamed_cdna.refer.fasta \
-  --history-gtf test/pantrans_construct_out/test_pantrans_unrenamed.gtf \
+  --history-gff3 test/pantrans_construct_out/test_pantrans_unrenamed.gff3 \
   --query-cdna test/JM22_cdna.fasta \
   --gdna test/JM22.gdna.fasta \
   --bed test/test_pantrans_pre.refer_append_JM22.bed \
@@ -263,17 +329,17 @@ The `append` workflow performs the following steps:
 4. Align historical nonredundant cDNA to new gDNA
 5. Reuse historical graph edges, merge the two cross-edge blocks, and merge their filtered BAMs with the historical filtered BAM
 6. Rebuild graph-based `pre` and `last` clusters using exactly the construct clustering flow
-7. Seed final transcript deduplication with historical GTF models whose original
+7. Seed final transcript deduplication with historical GFF3 models whose original
    representative gene ID is still a current `last` representative
-8. Write official and unrenamed final GTF/cDNA outputs plus a graph package for
+8. Write official and unrenamed final GFF3/cDNA outputs plus a graph package for
    a later append
 
-All sequence-backed historical and new genes are eligible cluster members. The append BED is only the user-facing representative-plus-query BED contract; the historical graph package supplies the complete historical BED and gDNA sequence set used internally. Historical GTF coordinates are reused only when their original representative gene ID remains a current `last` cluster representative; transcript models are not projected onto a different representative coordinate system.
+All sequence-backed historical and new genes are eligible cluster members. The append BED is only the user-facing representative-plus-query BED contract; the historical graph package supplies the complete historical BED and gDNA sequence set used internally. Historical GFF3 coordinates are reused only when their original representative gene ID remains a current `last` cluster representative; transcript models are not projected onto a different representative coordinate system.
 
 The two cross-alignment blocks avoid recomputing historical cDNA against historical gDNA. Since minimap2 retains a bounded number of secondary alignments, the incremental graph is expected to be highly similar to, but not byte-identical with, a monolithic construct graph.
 
 To append another variety, use the current append run's graph package together
-with its `_unrenamed.gtf` and `_unrenamed_cdna.refer.fasta` outputs as the next
+with its `_unrenamed.gff3` and `_unrenamed_cdna.refer.fasta` outputs as the next
 run's historical inputs.
 
 If an append job fails after either cross-alignment finishes, rerun it with the
@@ -395,12 +461,12 @@ direction. Collinearity does not resolve all copy, assembly or annotation errors
 
 - `pre.tmp.cluster`: graph-derived intermediate clustering before final recursive refinement
 - `last.tmp.cluster`: final cluster list after recursive splitting and chromosome-aware assignment
-- `pre.gtf`: transcript deduplication result at the `pre` cluster level using original hub gene IDs
-- `_unrenamed.gtf`: final `last` transcript models using original representative IDs
-- `gtf`: transcript deduplication result at the `last` cluster level using `Pan...` gene naming
+- `pre.gff3`: transcript deduplication result at the `pre` cluster level using original hub gene IDs
+- `_unrenamed.gff3`: final `last` transcript models using original representative IDs
+- `gff3`: transcript deduplication result at the `last` cluster level using `Pan...` gene naming
 - `*.refer.bed`: BED entries for the cluster hub genes used as the reference set
 - `*_gdna.refer.fasta`: genomic sequences of cluster hub genes
-- `*_cdna.refer.fasta`: cDNA sequences reconstructed from the generated GTF
+- `*_cdna.refer.fasta`: cDNA sequences reconstructed from the generated GFF3
 - `*_unrenamed_cdna.refer.fasta`: final cDNA sequences keyed by original representative transcript IDs
 - `*.graph.json`: graph package manifest with source identities and alignment provenance
 - `*.graph.edges.tsv`: unique directed graph edges
@@ -418,3 +484,5 @@ direction. Collinearity does not resolve all copy, assembly or annotation errors
 ## Development notes
 
 This repository is still under active development. Some workflows have been implemented incrementally, and behavior may continue to evolve as clustering, transcript recovery, and append logic are refined.
+
+For supported TransDecoder 5.7.1, both serial and parallel modes use a private deterministic ORF selector: original priorities are preserved, with the lexicographically smallest ORF ID winning complete ties. This can change previously arbitrary tied predictions. Unsupported installations warn that deterministic tie-breaking is unavailable.

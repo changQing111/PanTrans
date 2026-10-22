@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 import hashlib
 import os
@@ -42,7 +43,7 @@ class GraphPackageTest(unittest.TestCase):
             self._write_file(gdna_path, ">Ref.g1\nAAAA\n>Ref.g2\nAAA\n")
             self._write_file(
                 bed_path,
-                "chr1\t0\t4\tRef.g1\t0\t+\n"
+                "chr1\t0\t4\tRef.g1\tRef\t+\n"
                 "chr1\t10\t13\tRef.g2\t0\t-\n",
             )
             with pysam.AlignmentFile(
@@ -96,7 +97,7 @@ class GraphPackageTest(unittest.TestCase):
             manifest_path = os.path.join(temp_dir, "history.graph.json")
             self._write_file(cdna_path, ">Ref.g1.1\nAAAA\n")
             self._write_file(gdna_path, ">Ref.g1\nAAAA\n")
-            self._write_file(bed_path, "chr1\t0\t4\tRef.g1\t0\t+\n")
+            self._write_file(bed_path, "chr1\t0\t4\tRef.g1\tRef\t+\n")
             with pysam.AlignmentFile(
                 bam_path,
                 "wb",
@@ -128,7 +129,7 @@ class GraphPackageTest(unittest.TestCase):
             manifest_path = os.path.join(temp_dir, "history.graph.json")
             self._write_file(cdna_path, ">Ref.g1.1\nAAAA\n")
             self._write_file(gdna_path, ">Ref.g1\nAAAA\n")
-            self._write_file(bed_path, "chr1\t0\t4\tRef.g1\t0\t+\n")
+            self._write_file(bed_path, "chr1\t0\t4\tRef.g1\tRef\t+\n")
             with pysam.AlignmentFile(
                 bam_path,
                 "wb",
@@ -188,12 +189,12 @@ class BedMergeTest(unittest.TestCase):
             output_path = os.path.join(temp_dir, "merged.bed")
             with open(history_path, "w", encoding="utf-8") as handle:
                 handle.write(
-                    "chr1\t0\t4\tRef.g1\t0\t+\n"
+                    "chr1\t0\t4\tRef.g1\tRef\t+\n"
                     "chr1\t10\t14\tRef.g2\t0\t+\n"
                 )
             with open(append_path, "w", encoding="utf-8") as handle:
                 handle.write(
-                    "chr1\t0\t4\tRef.g1\t0\t+\n"
+                    "chr1\t0\t4\tRef.g1\tRef\t+\n"
                     "chr1\t20\t24\tJM22.g1\t0\t-\n"
                 )
 
@@ -210,7 +211,7 @@ class BedMergeTest(unittest.TestCase):
             self.assertEqual(
                 rows,
                 [
-                    "chr1\t0\t4\tRef.g1\t0\t+",
+                    "chr1\t0\t4\tRef.g1\tRef\t+",
                     "chr1\t10\t14\tRef.g2\t0\t+",
                     "chr1\t20\t24\tJM22.g1\t0\t-",
                 ],
@@ -222,7 +223,7 @@ class BedMergeTest(unittest.TestCase):
             append_path = os.path.join(temp_dir, "append.bed")
             output_path = os.path.join(temp_dir, "merged.bed")
             with open(history_path, "w", encoding="utf-8") as handle:
-                handle.write("chr1\t0\t4\tRef.g1\t0\t+\n")
+                handle.write("chr1\t0\t4\tRef.g1\tRef\t+\n")
             with open(append_path, "w", encoding="utf-8") as handle:
                 handle.write("chr1\t20\t24\tUnexpected.g1\t0\t+\n")
 
@@ -482,7 +483,7 @@ class ConstructGraphPackageTest(unittest.TestCase):
             for path, content in (
                 (cdna_path, ">Ref.g1.1\nAAAA\n"),
                 (gdna_path, ">Ref.g1\nAAAA\n"),
-                (bed_path, "chr1\t0\t4\tRef.g1\t0\t+\n"),
+                (bed_path, "chr1\t0\t4\tRef.g1\tRef\t+\n"),
             ):
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write(content)
@@ -503,7 +504,7 @@ class ConstructGraphPackageTest(unittest.TestCase):
             ), mock.patch.object(
                 pipeline,
                 "_write_cluster_outputs",
-                return_value=("out.gtf", "out.cdna", "out.gdna", "out.bed"),
+                return_value=("out.gff3", "out.cdna", "out.gdna", "out.bed"),
             ), mock.patch.object(
                 pipeline,
                 "bam_alignment_provenance",
@@ -523,7 +524,6 @@ class ConstructGraphPackageTest(unittest.TestCase):
                     bed_path,
                     bam_path,
                     None,
-                    ["Ref"],
                     1,
                     temp_dir,
                     "Pan",
@@ -603,17 +603,21 @@ class IncrementalAppendTest(unittest.TestCase):
     def test_append_uses_history_graph_and_two_cross_alignments(self):
         expected_parameters = [
             "history_cdna_path",
-            "history_gtf_path",
+            "history_gff3_path",
             "query_cdna_path",
             "query_gdna_path",
             "all_bed_path",
             "history_graph_path",
-            "variety_name",
             "threads",
             "out_dir",
             "prefix",
             "query_to_all_bam",
             "history_to_query_bam",
+            "rescue",
+            "annotate_cds",
+            "transdecoder_dir",
+            "min_orf_length",
+            "transdecoder_parallel",
         ]
         self.assertEqual(
             list(inspect.signature(pipeline.unit_append).parameters),
@@ -650,6 +654,9 @@ class IncrementalAppendTest(unittest.TestCase):
                     'Ref.g1\tPan\ttranscript\t1\t100\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Ref.g1.1";\n'
                     'Ref.g1\tPan\texon\t1\t100\t.\t+\t.\tgene_id "Ref.g1"; transcript_id "Ref.g1.1";\n'
                 )
+
+            Path(history_bed).write_text("chr1\t0\t100\tRef.g1\tRef\t+\n")
+            Path(append_bed).write_text("chr1\t0\t100\tRef.g1\tRef\t+\nchr1\t100\t200\tJM22.g1\tJM22\t+\n")
 
             package = {
                 "cdna_paths": [raw_history_cdna],
@@ -700,8 +707,8 @@ class IncrementalAppendTest(unittest.TestCase):
             def merge_bed(*args, **kwargs):
                 output_path = kwargs.get("output_path", args[-1])
                 with open(output_path, "w", encoding="utf-8") as output:
-                    output.write("chr1\t0\t100\tRef.g1\t0\t+\n")
-                    output.write("chr1\t100\t200\tJM22.g1\t0\t+\n")
+                    output.write("chr1\t0\t100\tRef.g1\tRef\t+\n")
+                    output.write("chr1\t100\t200\tJM22.g1\tJM22\t+\n")
                 return output_path
 
             graph = mock.Mock()
@@ -771,12 +778,11 @@ class IncrementalAppendTest(unittest.TestCase):
                  mock.patch.object(pipeline, "write_graph_package") as write_package:
                 pipeline.unit_append(
                     history_cdna_path=history_cdna,
-                    history_gtf_path=history_gtf,
+                    history_gff3_path=history_gtf,
                     query_cdna_path=query_cdna,
                     query_gdna_path=query_gdna,
                     all_bed_path=append_bed,
                     history_graph_path=history_graph,
-                    variety_name=["JM22"],
                     threads=1,
                     out_dir=out_dir,
                     prefix="Append",
@@ -851,11 +857,11 @@ class IncrementalAppendTest(unittest.TestCase):
                 {"Ref.g1", "JM22.g1"},
             )
             self.assertEqual(
-                write_outputs.call_args_list[0].kwargs.get("seed_gtf_path"),
+                write_outputs.call_args_list[0].kwargs.get("seed_gff3_path"),
                 None,
             )
             self.assertEqual(
-                write_outputs.call_args_list[1].kwargs["seed_gtf_path"],
+                write_outputs.call_args_list[1].kwargs["seed_gff3_path"],
                 history_gtf,
             )
             write_package.assert_called_once()

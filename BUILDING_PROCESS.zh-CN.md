@@ -2,7 +2,7 @@
 
 [English](BUILDING_PROCESS.md)
 
-本文档描述 PanTrans 0.6.0 的当前实现，包括使用 `construct` 进行多品种全新构建，以及使用 `append` 进行可连续追加的增量更新。
+本文档描述 PanTrans 0.7.0 的当前实现，包括使用 `construct` 进行多品种全新构建，以及使用 `append` 进行可连续追加的增量更新。
 
 ## 1. 核心模型
 
@@ -29,7 +29,7 @@ source_gene -> target_gene
 | gDNA FASTA | 作为比对目标的基因序列 | FASTA ID 为基因 ID，例如 `CS.g1` |
 | BED | 基因坐标、品种和链方向 | 第 4 列为基因 ID，第 5 列为品种名，第 1 列为染色体或 contig |
 | 品种名称 | 从 BED 第 5 列读取 | 每个基因必须有非空品种标签 |
-| 历史 GTF | 上一次运行生成的未重命名最终转录本模型 | GTF 序列名必须等于 `gene_id`，转录本 ID 为 `<gene_id>.<数字>` |
+| 历史 GFF3 | 上一次运行生成的未重命名最终转录本模型 | GFF3 序列名必须等于 gene 的 `ID`，转录本 ID 为 `<gene_id>.<数字>` |
 
 历史品种与新增品种之间不能出现重复基因 ID。品种身份来自 BED 第 5 列，因此基因 ID 不再需要编码品种前缀。
 
@@ -71,7 +71,7 @@ flowchart TD
     G --> H["染色体感知细化 -> last 簇"]
     H --> I["写出可复用图包"]
     H --> J["生成 pre 转录本和序列结果"]
-    J --> K["生成未重命名最终 GTF；仅在 --rescue 时恢复缺失模型"]
+    J --> K["生成未重命名最终 GFF3；仅在 --rescue 时恢复缺失模型"]
     K --> L["确定性重命名为官方 Pan ID"]
     L --> M["写出官方和未重命名 cDNA，以及参考 gDNA/BED"]
 ```
@@ -149,41 +149,45 @@ PanTrans 执行以下图操作：
 
 对于每个簇代表基因，PanTrans 会为每个候选转录本选择最佳比对，并重建外显子坐标和剪接区间。
 
-候选转录本按照剪接模式的包含关系分组，每组选择最长的有效转录本作为代表异构体。GTF 坐标会限制在代表基因长度范围内。
+候选转录本按照剪接模式的包含关系分组，每组选择最长的有效转录本作为代表异构体。GFF3 坐标会限制在代表基因长度范围内。
 
 `pre` 结果使用原始 ID：
 
 ```text
-<prefix>_pre.gtf
+<prefix>_pre.gff3
 <prefix>_pre_cdna.refer.fasta
 <prefix>_pre_gdna.refer.fasta
 <prefix>_pre.refer.bed
 ```
 
-只有显式指定 `--rescue` 时，才会对缺少转录本模型的簇代表进行恢复：先尝试复用 `pre` GTF 中的匹配模型，再对仍缺失的基因执行定向补救比对。未指定时不执行恢复比对。
+只有显式指定 `--rescue` 时，才会对缺少转录本模型的簇代表进行恢复：先尝试复用 `pre` GFF3 中的匹配模型，再对仍缺失的基因执行定向补救比对。未指定时不执行恢复比对。
 
 ### 4.6 写出双版本最终转录组
 
 最终 `last` 结果以两种形式生成：
 
-1. 转录本去冗余先生成 `<prefix>_unrenamed.gtf`，使用原始代表基因 ID；只有指定 `--rescue` 时才追加恢复流程。
-2. PanTrans 校验每个转录本 ID 是否为 `<原始基因ID>.<数字后缀>`。
-3. 通过确定性的 `Pan...` 映射替换 GTF 的 `gene_id` 和 `transcript_id` 属性，同时保留转录本数字后缀。GTF 第 1 列仍保留原始代表序列名，使坐标继续对应原始 gDNA 记录。
-4. 官方 GTF 按 Pan 基因顺序排序。
-5. 分别根据两个 GTF 重建 cDNA。
+1. 转录本去冗余先生成 `<prefix>_unrenamed.gff3`，使用原始代表基因 ID；只有指定 `--rescue` 时才追加恢复流程。
+2. PanTrans 校验每个转录本 ID 是否为 `<原始基因ID>.<数字后缀>`，并提取未重命名 cDNA。
+3. 指定 `--annotate-cds` 时，对该 cDNA 运行一次 TransDecoder，再沿 exon 映射 CDS 坐标。GFF3 CDS 包含终止密码子，仅在可信 ORF 边界添加 UTR；跨外显子的 CDS 共用 ID，按转录方向计算 phase。
+4. 通过确定性的 `Pan...` 映射替换 GFF3 各层级的 `ID` 和 `Parent` 属性，同时保留转录本数字后缀。GFF3 第 1 列仍保留原始代表序列名，使坐标继续对应原始 gDNA 记录。
+5. 官方 GFF3 排序时保证父特征先于子特征，并从中提取官方 cDNA。
+
+所有新注释（包括 pre 和 rescue 中间文件）均含单个 `##gff-version 3` 头，
+使用 gene/mRNA/exon 层级。append 使用 `--history-gff3`；为迁移历史结果，
+仍支持旧 GTF 输入及 `--history-gtf` 别名，但不再生成新的 GTF 文件。
 
 最终输出包括：
 
 ```text
-<prefix>_unrenamed.gtf
+<prefix>_unrenamed.gff3
 <prefix>_unrenamed_cdna.refer.fasta
-<prefix>.gtf
+<prefix>.gff3
 <prefix>_cdna.refer.fasta
 <prefix>_gdna.refer.fasta
 <prefix>.refer.bed
 ```
 
-两组 GTF/cDNA 描述相同的最终转录本模型，但属性和 FASTA ID 不同：未重命名版本是后续 `append` 的衔接接口，官方版本是公开使用的 `Pan...` 结果。
+两组 GFF3/cDNA 描述相同的最终转录本模型，但属性和 FASTA ID 不同：未重命名版本是后续 `append` 的衔接接口，官方版本是公开使用的 `Pan...` 结果。
 
 ## 5. Append 流程
 
@@ -192,7 +196,7 @@ PanTrans 执行以下图操作：
 ```mermaid
 flowchart TD
     A["历史图包"] --> B["校验源文件和图边来源"]
-    C["历史未重命名 GTF 和 cDNA"] --> D["校验转录本完全一致"]
+    C["历史未重命名 GFF3 和 cDNA"] --> D["校验转录本完全一致"]
     E["新增 cDNA、gDNA、BED 和品种名"] --> F["校验新增 ID 和 BED 覆盖"]
     B --> G["构建合并 cDNA、gDNA 和 BED"]
     D --> G
@@ -206,8 +210,8 @@ flowchart TD
     J --> M["加入 N -> H、N -> N 和 H -> N 图边"]
     L --> N["使用 construct 的共享聚类流程"]
     M --> N
-    N --> O["生成不使用历史 GTF 种子的 pre 结果"]
-    N --> P["使用历史 GTF 种子生成最终结果"]
+    N --> O["生成不使用历史 GFF3 种子的 pre 结果"]
+    N --> P["使用历史 GFF3 种子生成最终结果"]
     P --> Q["写出新图包和双版本最终转录组"]
 ```
 
@@ -216,7 +220,7 @@ flowchart TD
 | 参数 | 作用 |
 | --- | --- |
 | `--cdna` | 上一次运行的 `<prefix>_unrenamed_cdna.refer.fasta` |
-| `--history-gtf` | 与之配套的 `<prefix>_unrenamed.gtf` |
+| `--history-gff3` | 与之配套的 `<prefix>_unrenamed.gff3` |
 | `--query-cdna` | 新增品种的完整 cDNA FASTA |
 | `--gdna` | 新增品种的完整 gDNA FASTA |
 | `--bed` | 历史 pre 簇代表基因加全部新增基因；第 5 列必须标注每行品种 |
@@ -237,10 +241,10 @@ append 在开始比对前会校验：
 - 历史 gDNA 与新增 gDNA 之间没有重复基因 ID；
 - 每个历史和新增基因都有且只有一个 BED 第 5 列品种名；
 - 每个查询 cDNA 基因都存在于查询 gDNA；
-- 历史 GTF 转录本 ID 与历史 cDNA FASTA ID 完全相等；
-- 历史 GTF 序列名等于其 `gene_id`；
+- 历史 GFF3 转录本 ID 与历史 cDNA FASTA ID 完全相等；
+- 历史 GFF3 序列名等于其 gene 的 `ID`；
 - 历史转录本 ID 符合 `<gene_id>.<数字>`；
-- 历史 GTF 基因属于历史图，且未使用官方 `Pan...` ID。
+- 历史 GFF3 基因属于历史图，且未使用官方 `Pan...` ID。
 
 这些检查均在 minimap2 启动前失败退出。
 
@@ -308,40 +312,40 @@ BAM 参考序列会根据完整合并目标头按名称校验和重映射，不�
 
 append 的 `pre` 结果只使用从合并过滤 BAM 重建的候选转录本。
 
-append 的最终 `last` 结果还会把上一次未重命名 GTF 作为权威种子加载：
+append 的最终 `last` 结果还会把上一次未重命名 GFF3 作为权威种子加载：
 
-- 从 GTF 重建历史外显子坐标和剪接区间；
+- 从 GFF3 重建历史外显子坐标和剪接区间；
 - 只有原始代表基因仍是当前 `last` 簇字典键时，才使用该历史种子；
 - 历史种子会覆盖同转录本 ID 的 BAM 候选；
 - 如果代表基因发生变化，该种子会被计数并跳过，因为没有重新比对就不能把坐标投影到另一个代表序列；
 - 历史种子和 BAM 候选随后共同执行正常的剪接模式分组和最长转录本选择。
 
-结果仍然先写成未重命名 GTF/cDNA，再确定性转换为官方 `Pan...` 版本。
+结果仍然先写成未重命名 GFF3/cDNA，再确定性转换为官方 `Pan...` 版本。
 
 ### 5.7 写出下一代图包
 
 append 会写出新的图包，包含合并图、合并节点状态、合并过滤 BAM、累积的源 gDNA 片段、历史非冗余 cDNA 加新增 cDNA，以及全部图边来源代次。
 
-这个图包和新的未重命名 GTF/cDNA 对，将作为下一次 append 的历史输入。
+这个图包和新的未重命名 GFF3/cDNA 对，将作为下一次 append 的历史输入。
 
 ## 6. 连续 Append
 
 ```text
 construct 输出
   -> graph.json
-  -> _unrenamed.gtf
+  -> _unrenamed.gff3
   -> _unrenamed_cdna.refer.fasta
 
 追加品种 1
   -> 新 graph.json
-  -> 新 _unrenamed.gtf
+  -> 新 _unrenamed.gff3
   -> 新 _unrenamed_cdna.refer.fasta
 
 追加品种 2
   -> 使用最新的三个历史文件重复运行
 ```
 
-三个历史文件必须来自同一次成功运行。混用不同运行的图包和 GTF/cDNA 对会被校验拒绝，或导致无效的坐标模型。
+三个历史文件必须来自同一次成功运行。混用不同运行的图包和 GFF3/cDNA 对会被校验拒绝，或导致无效的坐标模型。
 
 ## 7. 主要输出文件
 
@@ -349,9 +353,9 @@ construct 输出
 | --- | --- |
 | `<prefix>_pre.tmp.cluster` | 图推导出的中间簇 |
 | `<prefix>_last.tmp.cluster` | 染色体感知的最终簇 |
-| `<prefix>_pre.gtf` | 使用原始 ID 的 pre 簇转录本模型 |
-| `<prefix>_unrenamed.gtf` | 使用原始代表 ID 的最终转录本模型 |
-| `<prefix>.gtf` | 使用官方 `Pan...` ID 的最终转录本模型 |
+| `<prefix>_pre.gff3` | 使用原始 ID 的 pre 簇转录本模型 |
+| `<prefix>_unrenamed.gff3` | 使用原始代表 ID 的最终转录本模型 |
+| `<prefix>.gff3` | 使用官方 `Pan...` ID 的最终转录本模型 |
 | `<prefix>_unrenamed_cdna.refer.fasta` | 后续 append 使用的衔接 cDNA |
 | `<prefix>_cdna.refer.fasta` | 官方最终 cDNA |
 | `<prefix>_gdna.refer.fasta` | 最终代表基因序列 |
@@ -362,12 +366,12 @@ construct 输出
 
 ## 8. 失败与断点续跑
 
-- 源文件身份、来源信息、ID、GTF/cDNA 和 BED 校验错误会在 append 比对前终止运行。
+- 源文件身份、来源信息、ID、GFF3/cDNA 和 BED 校验错误会在 append 比对前终止运行。
 - 交叉比对失败后，可以通过对应的原始 BAM 参数断点续跑。
 - 复用 BAM 始终由当前 PanTrans 重新过滤。
 - 已经过 PanTrans 过滤的 BAM 不能作为断点输入，因为流程需要原始比对记录和来源信息。
 - 只有指定 `--rescue` 时，当前缺失的转录本模型才会从 `pre` 结果或定向补救比对中恢复；否则保持缺失。
-- 代表基因已经改变的历史 GTF 模型会被跳过，而不会进行坐标投影。
+- 代表基因已经改变的历史 GFF3 模型会被跳过，而不会进行坐标投影。
 
 ## 9. 等价性预期与非目标
 
@@ -378,7 +382,7 @@ minimap2 的 `-N 100` 限制意味着，分开评估目标集合时可能保留�
 PanTrans 当前不会：
 
 - 在 append 中重新计算全部历史原始 cDNA 比对；
-- 将历史 GTF 坐标投影到另一个代表基因；
+- 将历史 GFF3 坐标投影到另一个代表基因；
 - 保证增量图、簇与一次性构建逐字节完全一致；
 - 使用仅包含历史代表基因的序列集替代完整历史图。
 
@@ -400,4 +404,4 @@ PanTrans 当前不会：
 | 比对、过滤、BAM 合并和来源信息 | `src/pantrans/align_filter.py` |
 | 有向图聚类 | `src/pantrans/construct_di_graph.py` |
 | 图包保存与校验 | `src/pantrans/graph_package.py` |
-| GTF 解析、转录本去冗余、重命名和 cDNA 提取 | `src/pantrans/transcript_processor.py` |
+| GFF3 解析、转录本去冗余、重命名和 cDNA 提取 | `src/pantrans/transcript_processor.py` |

@@ -27,10 +27,10 @@ export LC_ALL=C
 
 history_prefix=five_varieties
 history_manifest=${history_dir}/five_varieties.graph.json
-history_gtf=${history_construct_dir}/${history_prefix}_unrenamed.gtf
+history_gff3=${history_construct_dir}/${history_prefix}_unrenamed.gff3
 history_cdna=${history_construct_dir}/${history_prefix}_unrenamed_cdna.refer.fasta
 
-if [[ ! -s "${history_gtf}" || ! -s "${history_cdna}" ]]; then
+if [[ ! -s "${history_gff3}" || ! -s "${history_cdna}" ]]; then
     "${python_bin}" -m pantrans.main construct \
         --name /data/changq/PanTrans/test/tmp_variety.txt \
         --cdna /data/changq/PanTrans/test/tmp_cdna.fasta \
@@ -64,7 +64,7 @@ fi
     "${python_bin}" -m pantrans.main append \
         --name JM22 \
         --cdna "${history_cdna}" \
-        --history-gtf "${history_gtf}" \
+        --history-gff3 "${history_gff3}" \
         --query-cdna /data/changq/PanTrans/test/JM22_cdna.fasta \
         --gdna /data/changq/PanTrans/test/JM22.gdna.fasta \
         --bed /data/changq/PanTrans/test/test_pantrans_pre.refer_append_JM22.bed \
