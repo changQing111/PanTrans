@@ -132,7 +132,11 @@ def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refe
         List[List[str]]: 每个子列表是一组同簇基因。
     """
     main_chrom_order = build_main_chrom_order(main_chroms)
-    normalized_variety_li = ["Refer"] + [v for v in variety_li if v != "Refer"] if refer_prefixes else variety_li[:]
+    # Input order reflects BED concatenation / append history, not a biological
+    # priority. Use the same tie and traversal order for the same variety set.
+    ordered_varieties = sorted(set(variety_li), key=lambda v: (v.casefold(), v))
+    normalized_variety_li = (["Refer"] + [v for v in ordered_varieties if v != "Refer"]
+                             if refer_prefixes else ordered_varieties)
     variety_gene_dic = {v: [] for v in normalized_variety_li}
     unknown_genes = []
     for gene in cluster_li:

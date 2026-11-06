@@ -37,7 +37,7 @@ class FakeGraph:
 
 
 def full_scan_attachment(clusters, graph, bed, varieties):
-    """Reference behavior before the neighbor-index optimization."""
+    """Independent full scan using direct reciprocal support to the hub."""
     for source_index, cluster in enumerate(clusters):
         if len(cluster) != 1 or bed.get(cluster[0], (None,))[0] == "A1":
             continue
@@ -46,8 +46,8 @@ def full_scan_attachment(clusters, graph, bed, varieties):
         for index, target in enumerate(clusters):
             if index == source_index or not target:
                 continue
-            linked = [member for member in target
-                      if graph.has_edge(gene, member) and graph.has_edge(member, gene)]
+            linked = [target[0]] if (graph.has_edge(gene, target[0])
+                                    and graph.has_edge(target[0], gene)) else []
             if linked:
                 same = any(varieties.get(member) == varieties.get(gene)
                            for member in linked) if varieties else False
@@ -59,19 +59,19 @@ def full_scan_attachment(clusters, graph, bed, varieties):
 
 
 class IncrementalUnitRecursionTest(unittest.TestCase):
-    def test_exact_legacy_equivalence(self):
+    def test_legacy_equivalence_without_contig_attachment(self):
         from legacy_unit_recursion import legacy_unit_recursion
         rng = random.Random(18543099)
         for case in range(400):
             nodes = [f"{prefix}.g{i}" for i, prefix in enumerate(rng.choices(['A', 'B', 'Ref'], k=25))]
             graph = FakeGraph((a, b) for a in nodes for b in nodes if rng.random() < 0.16)
             lengths = {g: rng.choice([10, 20, 30]) for g in nodes if rng.random() < 0.9}
-            bed = {g: [rng.choice(['A1', 'Chr1A', 'ctg'])] for g in nodes if rng.random() < 0.9}
+            bed = {g: ['Chr1A'] for g in nodes}
             labels = {g: rng.choice(['A', 'B', 'Ref']) for g in nodes if rng.random() < 0.7}
             rng.shuffle(nodes)
             kwargs = dict(
                 bed_dic=bed if case % 4 else None,
-                main_chroms=['Chr1A'] if case % 3 else None,
+                main_chroms=['Chr1A'],
                 gene_variety_dic=labels if case % 2 else None,
                 refer_prefixes=['Ref'] if case % 5 else None,
             )
@@ -84,11 +84,41 @@ class IncrementalUnitRecursionTest(unittest.TestCase):
     def test_empty_singleton_and_contig_chain(self):
         from legacy_unit_recursion import legacy_unit_recursion
         graph = FakeGraph([('a', 'b'), ('b', 'a'), ('b', 'c'), ('c', 'b'), ('c', 'c')])
-        for nodes in ([], ['a'], ['missing'], ['c', 'b', 'a']):
+        for nodes in ([], ['a'], ['missing']):
             self.assertEqual(
                 construct_di_graph.unit_recursion(graph, nodes, {}, '', bed_dic={}),
                 legacy_unit_recursion(graph, nodes, {}, '', bed_dic={}),
             )
+        self.assertEqual(
+            construct_di_graph.unit_recursion(graph, ['c', 'b', 'a'], {}, '', bed_dic={}),
+            [['a', 'b'], ['c']],
+        )
+
+    def test_main_hub_does_not_recruit_through_contig_member(self):
+        graph = FakeGraph([('hub', 'a'), ('a', 'hub'), ('a', 'b'), ('b', 'a'),
+                           ('b', 'c'), ('c', 'b'), ('one_way', 'hub')])
+        result = construct_di_graph.unit_recursion(
+            graph, ['hub', 'a', 'b', 'c', 'one_way'], {}, '',
+            bed_dic={'hub': ['Chr1A']}, main_chroms=['Chr1A'])
+        self.assertEqual(result, [['hub', 'a'], ['b', 'c'], ['one_way']])
+
+    def test_random_partitions_have_direct_hub_support_and_preserve_genes(self):
+        rng = random.Random(20261028)
+        for case in range(200):
+            nodes = [f'g{i}' for i in range(25)]
+            graph = FakeGraph((a, b) for a in nodes for b in nodes if rng.random() < 0.15)
+            bed = {g: [rng.choice(['Chr1A', 'contig'])] for g in nodes}
+            result = construct_di_graph.unit_recursion(
+                graph, nodes, {}, '', bed_dic=bed, main_chroms=['Chr1A'])
+            with self.subTest(case=case):
+                self.assertCountEqual([g for c in result for g in c], nodes)
+                for cluster in result:
+                    for gene in cluster[1:]:
+                        self.assertTrue(graph.has_edge(cluster[0], gene))
+                        self.assertTrue(graph.has_edge(gene, cluster[0]))
+                rng.shuffle(nodes)
+                self.assertEqual(result, construct_di_graph.unit_recursion(
+                    graph, nodes, {}, '', bed_dic=bed, main_chroms=['Chr1A']))
 
 
 class IndexedAttachmentTest(unittest.TestCase):
@@ -116,11 +146,18 @@ class IndexedAttachmentTest(unittest.TestCase):
                     [c[:] for c in clusters], graph, bed, None, varieties)
                 self.assertEqual(actual, expected)
 
-    def test_tracks_moved_neighbors_and_skips_grown_singletons(self):
+    def test_moved_singleton_cannot_recruit_through_its_new_cluster(self):
         graph = FakeGraph([("a", "b"), ("b", "a"), ("c", "a"), ("a", "c")])
         result = construct_di_graph._attach_reciprocal_contig_singletons(
             [["a"], ["b"], ["c"], ["missing"]], graph, {}, None, {})
-        self.assertEqual(result, [["b", "a", "c"], ["missing"]])
+        self.assertEqual(result, [["b", "a"], ["c"], ["missing"]])
+
+    def test_last_attachment_requires_hub_not_member_support(self):
+        graph = FakeGraph([('hub', 'a'), ('a', 'hub'), ('a', 'b'), ('b', 'a'),
+                           ('hub', 'direct'), ('direct', 'hub')])
+        result = construct_di_graph._attach_reciprocal_contig_singletons(
+            [['hub', 'a'], ['b'], ['direct']], graph, {'hub': ['A1']}, None, {})
+        self.assertEqual(result, [['hub', 'a', 'direct'], ['b']])
 
     def test_sparse_graph_does_not_probe_unrelated_genes(self):
         class CountingGraph(FakeGraph):

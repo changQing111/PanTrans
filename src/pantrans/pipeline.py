@@ -57,6 +57,25 @@ logger = logging.getLogger(__name__)
 _BAM_MERGE_BATCH_SIZE = 128
 
 
+def _exon_policy(gene_regions, exon_regions, exon_overlap, exon_query_overlap):
+    if bool(gene_regions) != bool(exon_regions):
+        raise ValueError("--gene-regions and --exon-regions must be supplied together")
+    if not gene_regions:
+        return None
+    from .exon_filter import ExonPolicy
+    return ExonPolicy(gene_regions, exon_regions, exon_overlap, exon_query_overlap)
+
+
+def _map_exons(cdna, gdna, threads, bam, policy, rescue=False):
+    mapper = minimap2_map_rescue if rescue else minimap2_map
+    return mapper(cdna, gdna, threads, bam, **({"exon_policy": policy} if policy else {}))
+
+
+def _filter_exons(bam, output, bed, policy, cdna, collect_edges=True):
+    options = {"exon_policy": policy, "query_lengths": get_fasta_len(cdna)} if policy else {}
+    return filter_bam(bam, output, bed, collect_edges=collect_edges, **options)
+
+
 def _normalize_variety_names(variety_input):
     """Normalize variety input into a non-empty list of names."""
     if isinstance(variety_input, str):
@@ -425,7 +444,7 @@ def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_
                            trans_len_dic, gene_len_dic, gene_strand_dic, rename_map, out_dir, prefix, label,
                            all_cdna_path=None, threads=8, enable_rescue=False, pre_gff3_path=None,
                            seed_gff3_path=None, annotate_cds=False, transdecoder_dir=None,
-                           min_orf_length=50, transdecoder_parallel=False):
+                           min_orf_length=50, transdecoder_parallel=False, exon_policy=None):
     label_suffix = f"_{label}" if label else ""
     gff3_path = os.path.join(out_dir, f"{prefix}{label_suffix}.gff3")
     gdna_path = os.path.join(out_dir, f"{prefix}{label_suffix}_gdna.refer.fasta")
@@ -460,6 +479,7 @@ def _write_cluster_outputs(cluster_dic, all_gdna_path, all_bed_path, filter_bam_
             label=label,
             threads=threads,
             pre_gff3_path=pre_gff3_path,
+            **({"exon_policy": exon_policy} if exon_policy else {}),
         )
     extract_fasta_subset_by_names(all_gdna_path, refer_gene_li, gdna_path)
     if rename_map:
@@ -555,7 +575,7 @@ def _append_rescue_records_from_gff3(dst_gff3_path, rescue_records_by_gene, rena
 
 
 def _rescue_missing_cluster_genes(cluster_dic, gff3_path, all_cdna_path, all_gdna_path, all_bed_path,
-                                  rename_map, out_dir, prefix, label, threads, pre_gff3_path=None):
+                                  rename_map, out_dir, prefix, label, threads, pre_gff3_path=None, exon_policy=None):
     gff3_gene_set = _get_gff3_hub_genes(gff3_path)
     missing_cluster_dic = {
         hub: members
@@ -591,7 +611,6 @@ def _rescue_missing_cluster_genes(cluster_dic, gff3_path, all_cdna_path, all_gdn
     rescue_bam_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_cdna_align_gdna.bam")
     rescue_filtered_bam_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_cdna_align_gdna.filtered.bam")
     rescue_gff3_path = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue.gff3")
-    rescue_work_dir = os.path.join(out_dir, f"{prefix}{label_suffix}_rescue_work")
     transcript_index = build_transcript_index(all_cdna_path)
 
     kept_transcripts = write_transcripts_from_index(transcript_index, rescue_gene_names, rescue_cdna_path)
@@ -601,7 +620,7 @@ def _rescue_missing_cluster_genes(cluster_dic, gff3_path, all_cdna_path, all_gdn
             len(missing_cluster_dic),
             len(rescue_gene_names),
         )
-        return 0
+        return len(rescued_from_pre)
     kept_genes = extract_fasta_records_by_exact_names_indexed(all_gdna_path, rescue_gene_names, rescue_gdna_path)
     if kept_genes == 0:
         logger.warning(
@@ -609,69 +628,18 @@ def _rescue_missing_cluster_genes(cluster_dic, gff3_path, all_cdna_path, all_gdn
             len(missing_cluster_dic),
             len(rescue_gene_names),
         )
-        return 0
+        return len(rescued_from_pre)
     get_subset_bed(rescue_gene_names, all_bed_path, rescue_bed_path)
 
     logger.info(
-        "Run rescue alignment for %d missing clusters covering %d genes",
+        "Run one pooled rescue alignment for %d missing clusters covering %d genes",
         len(missing_cluster_dic),
         len(rescue_gene_names),
     )
-    if os.path.isdir(rescue_work_dir):
-        shutil.rmtree(rescue_work_dir)
-    os.makedirs(rescue_work_dir)
+    _map_exons(rescue_cdna_path, rescue_gdna_path, threads, rescue_bam_path, exon_policy, rescue=True)
+    rescue_bed_dic, rescue_gene_strand_dic = get_bed(rescue_bed_path)
+    _filter_exons(rescue_bam_path, rescue_filtered_bam_path, rescue_bed_dic, exon_policy, rescue_cdna_path, collect_edges=False)
 
-    single_cluster_dic = {hub: members for hub, members in missing_cluster_dic.items() if len(members) == 1}
-    multi_cluster_dic = {hub: members for hub, members in missing_cluster_dic.items() if len(members) > 1}
-    batch_raw_bams = []
-    batch_filtered_bams = []
-
-    for index, (hub, members) in enumerate(sorted(single_cluster_dic.items()), start=1):
-        batch_prefix = f"single_{index:06d}"
-        batch_cdna_path = os.path.join(rescue_work_dir, f"{batch_prefix}.cdna.fasta")
-        batch_gdna_path = os.path.join(rescue_work_dir, f"{batch_prefix}.gdna.fasta")
-        batch_bed_path = os.path.join(rescue_work_dir, f"{batch_prefix}.bed")
-        batch_bam_path = os.path.join(rescue_work_dir, f"{batch_prefix}.bam")
-        batch_filtered_bam_path = os.path.join(rescue_work_dir, f"{batch_prefix}.filtered.bam")
-
-        write_transcripts_from_index(transcript_index, members, batch_cdna_path)
-        extract_fasta_records_by_exact_names_indexed(all_gdna_path, members, batch_gdna_path)
-        get_subset_bed(members, all_bed_path, batch_bed_path)
-        minimap2_map_rescue(batch_cdna_path, batch_gdna_path, threads, batch_bam_path)
-        batch_bed_dic, _ = get_bed(batch_bed_path)
-        filter_bam(batch_bam_path, batch_filtered_bam_path, batch_bed_dic)
-        batch_raw_bams.append(batch_bam_path)
-        batch_filtered_bams.append(batch_filtered_bam_path)
-
-    if multi_cluster_dic:
-        multi_gene_names = sorted({gene for members in multi_cluster_dic.values() for gene in members})
-        batch_cdna_path = os.path.join(rescue_work_dir, "multi.cdna.fasta")
-        batch_gdna_path = os.path.join(rescue_work_dir, "multi.gdna.fasta")
-        batch_bed_path = os.path.join(rescue_work_dir, "multi.bed")
-        batch_bam_path = os.path.join(rescue_work_dir, "multi.bam")
-        batch_filtered_bam_path = os.path.join(rescue_work_dir, "multi.filtered.bam")
-
-        write_transcripts_from_index(transcript_index, multi_gene_names, batch_cdna_path)
-        extract_fasta_records_by_exact_names_indexed(all_gdna_path, multi_gene_names, batch_gdna_path)
-        get_subset_bed(multi_gene_names, all_bed_path, batch_bed_path)
-        minimap2_map_rescue(batch_cdna_path, batch_gdna_path, threads, batch_bam_path)
-        batch_bed_dic, _ = get_bed(batch_bed_path)
-        filter_bam(batch_bam_path, batch_filtered_bam_path, batch_bed_dic)
-        batch_raw_bams.append(batch_bam_path)
-        batch_filtered_bams.append(batch_filtered_bam_path)
-
-    if not _merge_bam_files(batch_raw_bams, rescue_bam_path):
-        shutil.rmtree(rescue_work_dir)
-        return len(rescued_from_pre)
-    if not _merge_bam_files(batch_filtered_bams, rescue_filtered_bam_path):
-        shutil.rmtree(rescue_work_dir)
-        return len(rescued_from_pre)
-
-    for bam_path in batch_raw_bams + batch_filtered_bams:
-        if os.path.exists(bam_path):
-            os.remove(bam_path)
-
-    rescue_gene_strand_dic = get_bed(rescue_bed_path)[1]
     rescue_gene_len_dic = get_fasta_len(rescue_gdna_path)
     rescue_trans_len_dic = get_fasta_len(rescue_cdna_path)
     rescue_cluster_dic = missing_cluster_dic
@@ -697,7 +665,11 @@ def _rescue_missing_cluster_genes(cluster_dic, gff3_path, all_cdna_path, all_gdn
         logger.info("Rescued %d previously missing genes into %s", len(rescued_gene_set), gff3_path)
     else:
         logger.warning("Rescue alignment produced no additional GFF3 entries.")
-    shutil.rmtree(rescue_work_dir)
+    logger.info(
+        "Rescue summary: %d recovered from pre-GFF3, %d recovered by alignment, %d still missing",
+        len(rescued_from_pre), len(rescued_gene_set),
+        len(missing_cluster_dic) - len(rescued_gene_set),
+    )
     return len(rescued_gene_set) + len(rescued_from_pre)
 
 
@@ -716,7 +688,9 @@ def unit_construct(
     transdecoder_dir=None,
     min_orf_length=50,
     transdecoder_parallel=False,
+    gene_regions=None, exon_regions=None, exon_overlap=0.90, exon_query_overlap=0.80,
 ):
+    exon_policy = _exon_policy(gene_regions, exon_regions, exon_overlap, exon_query_overlap)
     annotate_cds = annotate_cds or bool(transdecoder_dir)
     if min_orf_length < 1:
         raise ValueError("Minimum ORF length must be positive")
@@ -742,9 +716,9 @@ def unit_construct(
         logger.info("Skip sequence alignment; using existing BAM: %s", bam_path)
     else:
         logger.info("Start sequence alignment: all cDNA vs all gDNA")
-        minimap2_map(all_cdna_path, all_gdna_path, threads, align_bam_path)
+        _map_exons(all_cdna_path, all_gdna_path, threads, align_bam_path, exon_policy)
         logger.info("Finish sequence alignment")
-    aligned_gene_li, gene_len_dic = filter_bam(align_bam_path, filter_bam_path, bed_dic)
+    aligned_gene_li, gene_len_dic = _filter_exons(align_bam_path, filter_bam_path, bed_dic, exon_policy, all_cdna_path)
     logger.info("Finish BAM filtering, generated %s", filter_bam_path)
     # Step 2: Build graph and derive final gene clusters
     logger.info("Start graph building and gene assignment")
@@ -769,6 +743,9 @@ def unit_construct(
     construct_provenance["filter_thresholds_assumed"] = False
     construct_provenance["filter_thresholds_source"] = "current_construct_filter"
     construct_provenance["filter_logic_id"] = FILTER_LOGIC_ID
+    if exon_policy:
+        construct_provenance.update(exon_policy.provenance())
+        construct_provenance["target_mask"] = "provided-raw-bam" if bam_path else "gene-body-only-N-flanks-v1"
     write_graph_package(
         manifest_path=graph_package_path,
         edge_iter=graph.edges(),
@@ -816,6 +793,7 @@ def unit_construct(
         all_cdna_path=all_cdna_path,
         threads=threads,
         enable_rescue=rescue,
+        **({'exon_policy': exon_policy} if exon_policy else {}),
     )
 
     logger.info("Produce last-cluster transcript and sequence outputs")
@@ -834,6 +812,7 @@ def unit_construct(
         all_cdna_path=all_cdna_path,
         threads=threads,
         enable_rescue=rescue,
+        **({'exon_policy': exon_policy} if exon_policy else {}),
         pre_gff3_path=pre_gff3_path,
         annotate_cds=annotate_cds,
         transdecoder_dir=transdecoder_dir,
@@ -842,6 +821,15 @@ def unit_construct(
     )
     logger.info(f"{variety_li[-1]} construct end")
     return new_cdna_path, new_gdna_path, new_bed_path
+
+def _align_history_graph_cdna(cdna_path, gdna_path, threads, out_dir, prefix, bed_dic, exon_policy=None):
+    """Build graph-only alignments without overwriting annotation alignments."""
+    raw = os.path.join(out_dir, f"{prefix}_history_graph_to_query.bam")
+    filtered = os.path.join(out_dir, f"{prefix}_history_graph_to_query.filtered.bam")
+    _map_exons(cdna_path, gdna_path, threads, raw, exon_policy)
+    _filter_exons(raw, filtered, bed_dic, exon_policy, cdna_path, collect_edges=False)
+    return filtered
+
 
 def unit_append(
     history_cdna_path,
@@ -860,8 +848,13 @@ def unit_append(
     transdecoder_dir=None,
     min_orf_length=50,
     transdecoder_parallel=False,
+    history_graph_cdna_path=None,
+    gene_regions=None, exon_regions=None, exon_overlap=0.90, exon_query_overlap=0.80,
 ):
     """Append new varieties by reusing the complete historical graph."""
+    exon_policy = _exon_policy(gene_regions, exon_regions, exon_overlap, exon_query_overlap)
+    if exon_policy and (query_to_all_bam or history_to_query_bam):
+        raise ValueError("Exon-aware append requires fresh cross-alignments; use construct --bam to audit legacy raw BAMs")
     annotate_cds = annotate_cds or bool(transdecoder_dir)
     if min_orf_length < 1:
         raise ValueError("Minimum ORF length must be positive")
@@ -871,6 +864,8 @@ def unit_append(
     append_bed_variety_dic = _load_bed_variety_mapping(all_bed_path, required=True)
     history_package = load_graph_package(history_graph_path)
     current_provenance = alignment_provenance()
+    if exon_policy:
+        current_provenance.update(exon_policy.provenance())
     history_generations = validate_edge_provenance(
         history_package.get("provenance"), current_provenance
     )
@@ -919,6 +914,11 @@ def unit_append(
         for transcript_id in query_transcript_ids
     }
     history_gene_set = set(history_package["history_gene_ids"])
+    if history_graph_cdna_path:
+        graph_query_ids = get_fasta_sequence_identities(history_graph_cdna_path)
+        graph_query_genes = {transcript_to_gene_id(t) for t in graph_query_ids}
+        if graph_query_genes != history_gene_set:
+            raise ValueError("Historical graph cDNA must cover exactly the historical gene set")
     _validate_history_transcriptome(
         history_gff3_path, history_cdna_path, history_gene_set
     )
@@ -1023,6 +1023,8 @@ def unit_append(
             ]
             resume_provenance["filter_thresholds_assumed"] = False
             resume_provenance["filter_logic_id"] = FILTER_LOGIC_ID
+            if exon_policy:
+                resume_provenance.update(exon_policy.provenance())
             validate_edge_provenance(
                 {"edge_generations": [resume_provenance]}, current_provenance
             )
@@ -1031,11 +1033,12 @@ def unit_append(
     if query_to_all_bam:
         logger.info("Reuse query-to-all BAM: %s", query_to_all_bam_path)
     else:
-        minimap2_map(query_cdna_path, merged_gdna_path, threads, query_to_all_bam_path)
-    _, gene_len_dic = filter_bam(
+        _map_exons(query_cdna_path, merged_gdna_path, threads, query_to_all_bam_path, exon_policy)
+    _, gene_len_dic = _filter_exons(
         query_to_all_bam_path,
         query_to_all_filtered_bam_path,
         bed_dic,
+        exon_policy, query_cdna_path,
         collect_edges=False,
     )
 
@@ -1043,11 +1046,12 @@ def unit_append(
     if history_to_query_bam:
         logger.info("Reuse history-to-query BAM: %s", history_to_query_bam_path)
     else:
-        minimap2_map(history_cdna_path, query_gdna_path, threads, history_to_query_bam_path)
-    _, _ = filter_bam(
+        _map_exons(history_cdna_path, query_gdna_path, threads, history_to_query_bam_path, exon_policy)
+    _, _ = _filter_exons(
         history_to_query_bam_path,
         history_to_query_filtered_bam_path,
         bed_dic,
+        exon_policy, history_cdna_path,
         collect_edges=False,
     )
 
@@ -1062,11 +1066,19 @@ def unit_append(
     )
 
     logger.info("Merge historical and cross-alignment edges, then assign clusters")
+    # Keep graph queries separate from annotation queries: identical transcript
+    # IDs can denote different sequences in original and reconstructed FASTAs.
+    graph_history_bam = history_to_query_filtered_bam_path
+    if history_graph_cdna_path:
+        logger.info("Align historical original cDNA for graph edges only")
+        graph_history_bam = _align_history_graph_cdna(
+            history_graph_cdna_path, query_gdna_path, threads, out_dir, prefix, bed_dic,
+            **({"exon_policy": exon_policy} if exon_policy else {}))
     graph, pre_clusters, last_clusters = _derive_graph_and_clusters(
             aligned_gene_li=chain(
                 iter_graph_edges(history_package["edges_path"]),
                 iter_filtered_bam_gene_edges(query_to_all_filtered_bam_path),
-                iter_filtered_bam_gene_edges(history_to_query_filtered_bam_path),
+                iter_filtered_bam_gene_edges(graph_history_bam),
             ),
         gene_len_dic=gene_len_dic,
         bed_dic=bed_dic,
@@ -1090,13 +1102,16 @@ def unit_append(
     graph_package_path = os.path.join(out_dir, f"{prefix}.graph.json")
     append_provenance = dict(current_provenance)
     append_provenance["scope"] = "append_cross_alignments"
+    append_provenance["history_graph_cdna_path"] = history_graph_cdna_path or history_cdna_path
+    append_provenance["annotation_history_cdna_path"] = history_cdna_path
     write_graph_package(
         manifest_path=graph_package_path,
         edge_iter=graph.edges(),
         gene_len_dic=gene_len_dic,
         bed_path=merged_bed_path,
         filtered_bam_path=filtered_bam_path,
-        cdna_paths=[history_cdna_path, query_cdna_path],
+        cdna_paths=list(dict.fromkeys([history_cdna_path, query_cdna_path] +
+                                     ([history_graph_cdna_path] if history_graph_cdna_path else []))),
         gdna_paths=history_package["gdna_paths"] + [query_gdna_path],
         variety_names=variety_li,
         reference_name=history_package["reference_name"],
@@ -1130,6 +1145,7 @@ def unit_append(
         all_cdna_path=merged_cdna_path,
         threads=threads,
         enable_rescue=rescue,
+        **({'exon_policy': exon_policy} if exon_policy else {}),
     )
 
     logger.info("Produce append last-cluster transcript and sequence outputs")
@@ -1148,6 +1164,7 @@ def unit_append(
         all_cdna_path=merged_cdna_path,
         threads=threads,
         enable_rescue=rescue,
+        **({'exon_policy': exon_policy} if exon_policy else {}),
         pre_gff3_path=pre_gff3_path,
         seed_gff3_path=history_gff3_path,
         annotate_cds=annotate_cds,

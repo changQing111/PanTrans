@@ -49,7 +49,8 @@ def unit_recursion(
 ):
     """Split a component, maintaining induced in-degrees as genes are removed.
 
-    Representative tie-breaking and output ordering match the full-scan version.
+    Contigs attach only to a directly reciprocal representative, never through
+    another member. Representative tie-breaking and output ordering are stable.
     Input nodes are unique gene IDs, as supplied by SCC and chromosome grouping.
     """
     results = [[node] for node in sorted(node for node in node_li if node not in G)]
@@ -82,19 +83,19 @@ def unit_recursion(
             results.append([next(iter(pending))])
             break
         if not eligible:
-            # Preserve the first-compatible-cluster rule, including attachments
-            # to contigs processed earlier in this loop.
-            gene_to_cluster = {gene: i for i, cluster in enumerate(results) for gene in cluster}
+            # Only representatives can recruit remaining contigs. Register new
+            # singleton hubs, but never let an attached member extend a chain.
+            hub_to_cluster = {cluster[0]: i for i, cluster in enumerate(results)}
             for node in sorted(pending):
-                targets = [gene_to_cluster[member] for member in G.successors(node)
-                           if member in gene_to_cluster and G.has_edge(member, node)]
+                targets = [hub_to_cluster[hub] for hub in G.successors(node)
+                           if hub in hub_to_cluster and G.has_edge(hub, node)]
                 if targets:
                     index = min(targets)
                     results[index].append(node)
                 else:
                     index = len(results)
                     results.append([node])
-                gene_to_cluster[node] = index
+                    hub_to_cluster[node] = index
             break
 
         max_node = find_max_in_degree_nodes(
@@ -151,17 +152,17 @@ def _cluster_gene_set(clusters):
 
 
 def _attach_reciprocal_contig_singletons(clusters, graph, bed_dic, main_chroms, gene_variety_dic):
-    """Attach singleton unplaced genes to any cluster with direct reciprocal support."""
+    """Attach singleton unplaced genes only to directly reciprocal cluster hubs."""
     started = perf_counter()
     logger.info("Start reciprocal contig singleton attachment: %d clusters", len(clusters))
     main_chrom_set = set(main_chroms or MAIN_CHROMS)
     if main_chroms:
         from .assign_cluster_gene import build_main_chrom_order
         main_chrom_set = set(build_main_chrom_order(main_chroms))
-    # Clusters partition the genes. Keep stable cluster indexes while moving
-    # genes so later singletons see the same state as the sequential full scan.
-    gene_to_cluster = {
-        gene: index for index, cluster in enumerate(clusters) for gene in cluster
+    # Remove a singleton's hub entry when it moves: it becomes an ordinary
+    # member and must not recruit later singletons into its destination.
+    hub_to_cluster = {
+        cluster[0]: index for index, cluster in enumerate(clusters) if cluster
     }
     examined = attached = 0
     for source_index, source_cluster in enumerate(clusters):
@@ -177,7 +178,7 @@ def _attach_reciprocal_contig_singletons(clusters, graph, bed_dic, main_chroms, 
         for member in graph.successors(gene):
             if not graph.has_edge(member, gene):
                 continue
-            target_index = gene_to_cluster.get(member)
+            target_index = hub_to_cluster.get(member)
             if target_index is None or target_index == source_index:
                 continue
             same_variety = (
@@ -193,7 +194,7 @@ def _attach_reciprocal_contig_singletons(clusters, graph, bed_dic, main_chroms, 
             )[2]
             clusters[target_index].append(gene)
             clusters[source_index] = []
-            gene_to_cluster[gene] = target_index
+            del hub_to_cluster[gene]
             attached += 1
     result = [cluster for cluster in clusters if cluster]
     logger.info(

@@ -4,6 +4,8 @@ import os
 import shlex
 import tempfile
 import logging
+import json
+from collections import Counter
 from collections.abc import Mapping
 
 import pysam
@@ -228,7 +230,7 @@ def validate_resume_bam(bam_path, expected_query_ids, expected_target_lengths, l
         raise ValueError(f"{label} missing expected query transcripts: {missing}")
     return provenance
 
-def minimap2_map(cdna_path, gdna_path, threads, bam_path):
+def minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
     """Map through a checked pipe, publishing the BAM only after both tools exit."""
     if threads < 1:
         raise ValueError("threads must be at least 1")
@@ -247,6 +249,10 @@ def minimap2_map(cdna_path, gdna_path, threads, bam_path):
         prefix=".pantrans-align-", dir=os.path.dirname(bam_path)
     ) as work_dir:
         partial_bam = os.path.join(work_dir, "alignment.bam")
+        if exon_policy:
+            masked = os.path.join(work_dir, "masked.fa")
+            exon_policy.mask(gdna_path, masked)
+            gdna_path = masked
         map_cmd = ["minimap2"] + shlex.split(MINIMAP2_OPTIONS) + [
             "--split-prefix", os.path.join(work_dir, "mm2"),
             "-t", str(mapping_threads), os.fspath(gdna_path), os.fspath(cdna_path),
@@ -272,9 +278,12 @@ def minimap2_map(cdna_path, gdna_path, threads, bam_path):
                         process.wait()
         os.replace(partial_bam, bam_path)
 
-def minimap2_map_rescue(cdna_path, gdna_path, threads, bam_path):
+def minimap2_map_rescue(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
     """Use the same bounded batches and thread allocation for rescue mappings."""
-    minimap2_map(cdna_path, gdna_path, threads, bam_path)
+    if exon_policy:
+        minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=exon_policy)
+    else:
+        minimap2_map(cdna_path, gdna_path, threads, bam_path)
 
 def parse_cigar(cigartuples):
     """解析 CIGAR，返回 query 覆盖长度、对齐长度、软截断长度"""
@@ -303,7 +312,7 @@ def get_tag(read, key, default=0):
     except (KeyError, ValueError):
         return default
 
-def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True):
+def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True, exon_policy=None, query_lengths=None):
     """
     过滤 BAM 文件并生成新的 BAM 文件。
     过滤逻辑：
@@ -316,10 +325,20 @@ def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True):
         output_bam: 输出 BAM 文件路径
     """
     bam_file = pysam.AlignmentFile(bam_path, "rb")
+    if exon_policy:
+        if query_lengths is None:
+            bam_file.close()
+            raise ValueError("Exon filtering requires original query cDNA lengths")
+        try:
+            exon_policy.validate_targets(dict(zip(bam_file.references, bam_file.lengths)))
+        except Exception:
+            bam_file.close()
+            raise
     output_header = bam_file.header.to_dict()
     comments = list(output_header.get("CO", []))
-    if FILTERED_BAM_MARKER not in comments:
-        comments.append(FILTERED_BAM_MARKER)
+    marker = "pantrans-filtered=" + (exon_policy.provenance()["filter_logic_id"] if exon_policy else FILTER_LOGIC_ID)
+    if marker not in comments:
+        comments.append(marker)
     output_header["CO"] = comments
     out_bam = pysam.AlignmentFile(
         output_bam, "wb", header=pysam.AlignmentHeader.from_dict(output_header)
@@ -327,17 +346,21 @@ def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True):
 
     target_lengths = dict(zip(bam_file.references, bam_file.lengths))
     pair_gene_li = []
+    audit = Counter()
     # bed_dic[gene] = [chrom, start, end]
     for read in bam_file.fetch(until_eof=True):
+        audit["input_records"] += 1
         if read.is_unmapped or read.is_supplementary:
+            audit["unmapped_or_supplementary"] += 1
             continue
 
         refer_name = bam_file.get_reference_name(read.reference_id)
         if refer_name not in bed_dic:
+            audit["target_not_in_bed"] += 1
             # Ignore alignments to references that are not present in BED annotation.
             continue
         query_trans = transcript_to_gene_id(read.query_name)
-        if query_trans == refer_name:
+        if query_trans == refer_name and not exon_policy:
             out_bam.write(read)
             if collect_edges:
                 pair_gene_li.append((query_trans, refer_name))
@@ -349,6 +372,15 @@ def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True):
         #    continue
 
         qlen = len(seq) if seq else mlen
+        if exon_policy:
+            if read.query_name not in query_lengths:
+                out_bam.close()
+                bam_file.close()
+                raise ValueError(f"Query absent from input cDNA: {read.query_name}")
+            qlen = query_lengths[read.query_name]
+            if not read.has_tag("NM") or not exon_policy.accepts(read, qlen):
+                audit["missing_NM_or_exon_position_rejected"] += 1
+                continue
         cov = mlen / qlen if qlen > 0 else 0.0
         soft_ratio = soft / qlen if qlen > 0 else 0.0
 
@@ -363,11 +395,18 @@ def filter_bam(bam_path, output_bam, bed_dic, collect_edges=True):
             soft_ratio <= SOFT_MAX
         ])
         if passed_criteria == 3:
+            audit["retained_records"] += 1
             out_bam.write(read)
             if collect_edges:
                 pair_gene_li.append((query_trans, refer_name))
+        else:
+            audit["quality_rejected"] += 1
 
     bam_file.close()
     out_bam.close()
+    if exon_policy:
+        with open(os.fspath(output_bam) + ".filter.json", "w") as report:
+            json.dump({"counts": dict(audit), "filter_logic_id": marker,
+                       "exon_thresholds": exon_policy.provenance()["exon_thresholds"]}, report, indent=2)
 
     return pair_gene_li, target_lengths

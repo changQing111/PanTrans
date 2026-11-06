@@ -12,6 +12,8 @@ EDGE_PROVENANCE_KEYS = (
     "minimap2_options",
     "filter_thresholds",
     "filter_logic_id",
+    "target_mask",
+    "exon_thresholds",
 )
 
 
@@ -50,6 +52,10 @@ def validate_edge_provenance(historical_provenance, current_provenance):
         raise ValueError("Graph package has no edge provenance")
     mismatches = []
     for generation_index, generation in enumerate(historical_generations):
+        historical_regions = generation.get("gene_region_digests", {})
+        current_regions = current_provenance.get("gene_region_digests", {})
+        if any(current_regions.get(gene) != digest for gene, digest in historical_regions.items()):
+            mismatches.append(f"generation {generation_index} target annotation regions changed or missing")
         if generation.get("filter_thresholds_assumed", True):
             mismatches.append(
                 f"generation {generation_index} has assumed filter thresholds"

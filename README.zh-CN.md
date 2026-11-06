@@ -141,6 +141,10 @@ pantrans construct \
 - `--threads`：minimap2 与 samtools 共享的线程预算
 - `--rescue`：显式启用对最终未生成 GFF3 模型的簇代表基因进行恢复；默认关闭
 
+恢复时优先复用可用的 pre-cluster GFF3 模型，再将其余缺失簇全部成员的 cDNA
+与 gDNA 在每个输出阶段统一比对一次。生成模型时仍只接受簇内成员到代表基因的
+比对。沿用原比对参数，不保证所有缺失基因都能恢复。
+
 ### 示例
 
 ```bash
@@ -392,3 +396,54 @@ pre cluster 中。图边 TSV 为无表头的两列 `source_gene`、`target_gene`
 本项目仍在持续开发中。部分流程是逐步实现的，聚类、转录本恢复和 append 逻辑仍可能继续调整。
 
 对支持的 TransDecoder 5.7.1，串行和并行均使用运行目录中的确定性 ORF 选择脚本：保持原优先级，完全并列时选择字典序最小的 ORF ID。原先随机选中的并列 ORF 因而可能改变；不支持的安装会警告无法保证并列选择确定性。
+
+## 预处理 construct / append 输入
+
+新增 `preprocess` 子命令，三个列表按顺序一一对应：
+
+```bash
+pantrans preprocess \
+  --genomes /data/CS.fa /data/ZM366.fa \
+  --annotations /data/CS.gff3 /data/ZM366.gff3 \
+  --varieties CS ZM366 \
+  --flank 3000 --prefix two_variety --output prepared
+```
+
+也支持 `--genome-list genomes.txt --annotation-list annotations.txt --variety-list varieties.txt`：每行一个条目，忽略空行和 `#` 注释；列表文件内的相对路径相对于列表文件所在目录解析。基因组为未压缩 FASTA，注释为含 gene/transcript/exon 层级的 GFF3（可 gzip 压缩），暂不支持 GTF 或仅含 CDS 的注释。
+
+输出：
+
+- `two_variety_gene3000bp_gdna.fa`：联合基因组片段，包含请求的上下游；
+- `two_variety_mrna.fa`：按完整 exon 拼接的联合 cDNA，包含注释中的 UTR；
+- `two_variety_genes.bed`：原始基因组坐标，第四列 gene ID、第五列品种名；
+- FASTA 索引、`_gene_regions.tsv`、`_exon_regions.tsv`、`_id_map.tsv` 和 `_preprocess.json`。
+
+**contig/染色体边界自动截断侧翼，不补 N，也不会越界取序列。** 例如左端距边界仅 100 bp，就只取实际 100 bp；短于 6 kb 的 contig 同样处理。gene/exon 自身越界则报错，不截断注释模型。正负链均输出基因 5′→3′ 方向的 gDNA 和 cDNA。坐标表采用 0-based 半开区间，FASTA 头采用 1-based 闭区间；表中记录实际上下游长度、提取区间及 gene/exon 在 gDNA 内的位置，供后续位置过滤使用。本子命令不屏蔽序列，也不修改 BAM 过滤规则。
+
+gene ID 默认保留，跨品种必须唯一；存在重名时可用 `--namespace-ids` 统一添加 `品种名__` 前缀。已符合 `gene.数字` 的 transcript ID 保留后缀，其余按稳定顺序转换，并输出原始 ID 映射。相关 construct/append 的预处理应采用一致的命名策略。缺少转录本的 gene 跳过并计数；缺 exon、缺 Parent、外显子重叠、未知 contig 等错误会终止。校验失败不发布结果文件，已有同名前缀文件不会被覆盖。输入基因组旁不创建索引，允许只读输入目录。
+
+construct 可直接使用联合的三份主文件。append 时仅预处理新增品种，将新 cDNA 传给 `--query-cdna`、新 gDNA 传给 `--gdna`；将历史 BED 与新 BED 合并后传给 `--bed`，历史 final cDNA/GFF3 和图包仍按现有参数提供。预处理保留原始染色体和 contig 名，不猜测主染色体，后续仍通过 `--main-chroms` 明确指定。
+
+## 外显子感知比对与过滤
+
+向 construct/append 同时传入 `--gene-regions *_gene_regions.tsv` 和 `--exon-regions *_exon_regions.tsv` 启用新规则。未传表时保留旧行为。新比对将 gene body 外的侧翼置为 N，长度、ID和坐标不变，保留内含子；最终序列仍从原始 gDNA 提取。
+
+默认 `--exon-overlap 0.90`、`--exon-query-overlap 0.80`：同一目标转录本的外显子须覆盖至少90%的参考匹配碱基，且外显子内匹配长度至少占完整query cDNA的80%，链向一致；原相似度、覆盖度和软截断阈值仍生效。secondary使用真实输入cDNA长度，自比对不再豁免。每个过滤BAM旁保存 `.filter.json` 计数。
+
+`construct --bam` 支持旧原始BAM的新过滤，但无法找回旧比对未输出的候选，这类图标记为provided-raw-bam，不与新屏蔽参考图混用。新规则append要求重新交叉比对（暂不支持交叉BAM续跑），提供历史+新基因的全部坐标表；检查历史图的过滤规则、屏蔽方式、阈值与每基因注释指纹。rescue沿用同一规则。
+
+### CDS实验流程的端部兼容去冗余
+
+`experimental_cds_construct.py` 现在区分CDS-only/partial与完整观察模型。
+只在CDS一致、已覆盖区域外显子结构一致、缺失端部证据明确且唯一完整结构可解释时折叠；多重归属标记ambiguous，无匹配标记unresolved，真实UTR剪接差异保留。
+GFF3和model_sources.tsv增加证据与合并原因。具体规则见[端部兼容去冗余说明](docs/transcript-terminal-dedup.md)。此更新针对CDS实验入口，不修改旧construct/append去冗余，也不重写已有实验结果。
+
+### CDS构图输入的预处理
+
+`preprocess` 额外生成 `<prefix>_gene.fa`（含内含子、无侧翼）、`<prefix>_cds.fa`（全部已注释CDS）、`<prefix>_cds.valid.fa`（通过完整CDS注释/序列检查的子集）、CDS坐标及逐转录本状态表。**这里没有比对或构图，valid不表示同源关系或图边已通过验证。** 原cDNA、带侧翼gDNA和BED继续保留；不合格CDS也保留在全部CDS文件，缺CDS的基因不会因此从其它输入删除。
+
+新CDS实验入口可直接读取schema 2预处理目录，无需--annotations，也不再依赖five_variety前缀。见[文件与检查规则](docs/preprocess-cds-inputs.md)。
+
+## CDS构图开发流程
+
+最新CDS图、完整cDNA注释和加速重跑入口见[流程与边界说明](docs/cds-workflow.md)。加速入口为 `scripts/restart_cds_annotation.py`。CDS流程仍是实验入口，未替换常规construct/append；已完成结果不会因代码更新自动重算。

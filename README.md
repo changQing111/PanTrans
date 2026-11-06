@@ -194,6 +194,11 @@ pantrans construct \
 - `--threads`: thread budget shared by minimap2 and samtools
 - `--rescue`: explicitly enable rescue of cluster representatives missing from the generated GFF3; disabled by default
 
+Rescue first reuses available pre-cluster GFF3 models, then runs one pooled
+cDNA-to-gDNA alignment over all members of the remaining missing clusters per
+output stage. Only alignments within each cluster are used to recover models.
+The original mapping parameters are retained; some genes may remain missing.
+
 ### Example
 
 ```bash
@@ -486,3 +491,106 @@ direction. Collinearity does not resolve all copy, assembly or annotation errors
 This repository is still under active development. Some workflows have been implemented incrementally, and behavior may continue to evolve as clustering, transcript recovery, and append logic are refined.
 
 For supported TransDecoder 5.7.1, both serial and parallel modes use a private deterministic ORF selector: original priorities are preserved, with the lexicographically smallest ORF ID winning complete ties. This can change previously arbitrary tied predictions. Unsupported installations warn that deterministic tie-breaking is unavailable.
+
+## Prepare construct/append inputs
+
+`pantrans preprocess` accepts parallel lists of uncompressed genome FASTAs, GFF3
+annotations (optionally gzip-compressed), and unique variety names:
+
+```bash
+pantrans preprocess \
+  --genomes /data/CS.fa /data/ZM366.fa \
+  --annotations /data/CS.gff3 /data/ZM366.gff3 \
+  --varieties CS ZM366 \
+  --flank 3000 --prefix two_variety --output prepared
+```
+
+For long lists, use `--genome-list genomes.txt --annotation-list annotations.txt
+--variety-list varieties.txt` instead. Each file contains one entry per line in
+matching order; blank/comment lines are ignored. Relative paths in a list file
+are resolved relative to that file, not the process working directory.
+
+Outputs include `two_variety_gene3000bp_gdna.fa`, `two_variety_mrna.fa`,
+`two_variety_genes.bed`, FASTA indexes, `_gene_regions.tsv`, `_exon_regions.tsv`,
+`_id_map.tsv`, and `_preprocess.json`. BED column 5 is the supplied variety name.
+Genes without transcript models are skipped and counted. Transcript models must
+have explicit exons; CDS-only annotations and GTF are not supported by this
+subcommand. Exons include UTR sequence. Missing contigs, invalid coordinates,
+overlapping exons and unresolved parents are errors, not silently clipped models.
+
+Flanks are clipped to chromosome/contig bounds, including contigs shorter than
+6 kb; **gene/exon coordinates themselves are never clipped**. No padding is added.
+Both gDNA and spliced cDNA are oriented in the gene's 5′→3′ direction. Tables use
+0-based half-open coordinates; FASTA headers use 1-based inclusive coordinates.
+The gene table records actual upstream/downstream lengths and the gene body in
+local gDNA coordinates; the exon table records each transcript's local blocks.
+These tables support subsequent position-aware masking/filtering; preprocessing
+itself does not mask sequences or change the current BAM filter.
+
+Gene IDs are preserved and must be globally unique. If different varieties reuse
+IDs, pass `--namespace-ids` consistently to all related preprocessing runs; gene
+IDs become `VARIETY__original`. Compatible transcript IDs (`GENE.number`) retain
+their suffix; other transcript IDs are deterministically normalized to that form.
+Original IDs are always recorded in `_id_map.tsv`. Output files are not overwritten;
+use a fresh prefix or output directory. Input genome indexes are built privately
+and do not require writing beside the genome FASTA.
+
+Use the three combined files directly for `construct`. For `append`, preprocess
+only the new varieties, pass their `_mrna.fa` as `--query-cdna` and gDNA as `--gdna`,
+and concatenate the historical BED with the new BED for `--bed`. Keep original
+historical IDs and variety labels; the historical final cDNA/GFF3 and graph package
+are still supplied through the existing append options. Keep main chromosome
+names explicit through `construct --main-chroms`; preprocessing preserves contig
+names and does not guess which sequences are main chromosomes.
+
+## Exon-aware mapping and filtering
+
+Pass preprocessing tables to `construct` or `append`:
+
+```bash
+pantrans construct --cdna prepared/five_variety_mrna.fa \
+  --gdna prepared/five_variety_gene3000bp_gdna.fa \
+  --bed prepared/five_variety_genes.bed \
+  --gene-regions prepared/five_variety_gene_regions.tsv \
+  --exon-regions prepared/five_variety_exon_regions.tsv \
+  --exon-overlap 0.90 --exon-query-overlap 0.80 \
+  --reference CS --prefix five_variety --output results --threads 32
+```
+
+These options activate coordinate-preserving N masking outside each gene body
+for fresh minimap2 mappings, followed by same-transcript exon overlap and strand
+filtering. Introns remain unmasked. Query lengths come from input cDNA, including
+secondary records without SEQ. Self-alignments follow the same quality/position
+rules. Original gDNA remains the source for output sequences. Each filtered BAM
+gets a `.filter.json` count report. Without region tables, legacy behavior remains.
+
+`construct --bam` can apply the new filter to old raw BAMs, but cannot undo the
+original candidate truncation. Such graphs are marked `provided-raw-bam` and are
+not interchangeable with masked-reference graphs. Exon-aware append currently
+requires fresh cross-alignments and tables covering all historical and new genes;
+historical graph policy, thresholds, masking mode and historical per-gene region
+digests must match. Rescue uses the same policy. Coordinates are in preprocessing
+reference orientation; never pass genomic exon coordinates directly.
+
+### CDS and gene-body preprocessing outputs
+
+`preprocess` also emits `<prefix>_gene.fa` (gene body with introns, no flanks),
+`<prefix>_cds.fa` (all annotated CDS), `<prefix>_cds.valid.fa` (CDS passing
+complete-ORF/phase/sequence checks), CDS coordinates, per-transcript status and
+`_transcript_models.jsonl`. These are input checks, **not alignment or graph
+validation**. Unqualified annotated CDS remain in `_cds.fa`; genes lacking CDS
+remain in the cDNA/gDNA/BED outputs. Empty CDS files do not receive a FASTA index.
+
+Schema-2 preprocessing directories can be read directly by
+`experimental_cds_construct.py --prepared prepared --output results` without
+re-reading original annotations. Filenames are resolved from the manifest and
+may use any preprocessing prefix. Legacy schema-1 directories still require
+`--annotations`. CDS phase validates the reading frame; internal phase bases
+are never trimmed from the concatenated CDS. Existing flank clipping and
+strand orientation remain unchanged.
+
+## CDS graph development workflow
+
+The current CDS-graph/UTR-aware workflow is available through experimental scripts,
+including the accelerated annotation-only restart. See [workflow and limitations](docs/cds-workflow.md).
+The default construct/append commands have not been replaced by the CDS workflow.

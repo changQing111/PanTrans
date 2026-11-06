@@ -21,9 +21,21 @@ def read_parameters(argv=None):
     )
     # subcommands
     subparsers = parser.add_subparsers(
-        title="subcommand", description="construct, append, cnv, or translocation", dest="subcommand"
+        title="subcommand", description="preprocess, construct, append, cnv, or translocation", dest="subcommand"
     )
     subparsers.required = True
+
+    prepare_parser = subparsers.add_parser("preprocess", help="Prepare combined gene gDNA, spliced cDNA and BED from genomes/GFF3")
+    for direct, file_option, label in (("genomes", "genome-list", "uncompressed genome FASTAs"),
+                                       ("annotations", "annotation-list", "GFF3 annotations"),
+                                       ("varieties", "variety-list", "variety names")):
+        group = prepare_parser.add_mutually_exclusive_group(required=True)
+        group.add_argument("--" + direct, nargs="+", help="Ordered list of " + label)
+        group.add_argument("--" + file_option, help="Text file, one entry per line: " + label)
+    prepare_parser.add_argument("-o", "--output", required=True, help="output directory")
+    prepare_parser.add_argument("-p", "--prefix", default="Pan", help="output filename prefix")
+    prepare_parser.add_argument("--flank", type=int, default=3000, help="flank on each side, clipped at sequence boundaries (default: 3000)")
+    prepare_parser.add_argument("--namespace-ids", action="store_true", help="prefix every gene ID with VARIETY__; emit original/output ID map")
 
     # construct subcommand
     construct_parser = subparsers.add_parser(
@@ -83,6 +95,10 @@ def read_parameters(argv=None):
         help="previous unrenamed final GFF3 (legacy GTF also accepted; --history-gtf is a compatibility alias)",
     )
     append_parser.add_argument(
+        "--history-graph-cdna",
+        help="optional historical original cDNA for old-to-new graph edges only; annotation still uses --cdna",
+    )
+    append_parser.add_argument(
         "--query-cdna",
         required=True,
         help="new-variety cDNA sequences path",
@@ -130,6 +146,10 @@ def read_parameters(argv=None):
     )
 
     for coding_parser in (construct_parser, append_parser):
+        coding_parser.add_argument("--gene-regions", nargs="+", help="preprocess gene_regions.tsv tables; append requires history and new varieties")
+        coding_parser.add_argument("--exon-regions", nargs="+", help="preprocess exon_regions.tsv tables; enables flank masking and exon-aware filtering")
+        coding_parser.add_argument("--exon-overlap", type=float, default=0.90, help="minimum fraction of reference matched bases in one target transcript's exons")
+        coding_parser.add_argument("--exon-query-overlap", type=float, default=0.80, help="minimum fraction of full query cDNA supported by target exons")
         coding_parser.add_argument("--transdecoder-parallel", action="store_true", help="parallelize CDS scoring using -t CPUs (default: serial); requires CDS annotation")
         coding_parser.add_argument("--annotate-cds", action="store_true", help="predict CDS and UTR features in final GFF3s using TransDecoder")
         coding_parser.add_argument("--transdecoder-dir", help="TransDecoder executable directory (default: search PATH); implies --annotate-cds")
@@ -160,7 +180,25 @@ def read_parameters(argv=None):
     translocation_parser.add_argument("--include-unplaced", action="store_true", help="include pairs with unplaced genes in reports and ambiguity counts (never as block anchors)")
 
     args = parser.parse_args(argv)
+    if args.subcommand == "preprocess":
+        from .preprocess import read_list
+        try:
+            for direct, file_attr, paths in (("genomes", "genome_list", True),
+                                             ("annotations", "annotation_list", True),
+                                             ("varieties", "variety_list", False)):
+                if getattr(args, file_attr):
+                    setattr(args, direct, read_list(getattr(args, file_attr), paths=paths))
+        except (ValueError, OSError) as exc:
+            prepare_parser.error(str(exc))
+        if args.flank < 0:
+            prepare_parser.error("--flank must be nonnegative")
+        if not args.genomes or len(args.genomes) != len(args.annotations) or len(args.genomes) != len(args.varieties):
+            prepare_parser.error("Genome, annotation and variety lists must have equal nonzero lengths")
     if args.subcommand in ("construct", "append"):
+        if bool(args.gene_regions) != bool(args.exon_regions):
+            parser.error("--gene-regions and --exon-regions must be supplied together")
+        if not 0 < args.exon_overlap <= 1 or not 0 < args.exon_query_overlap <= 1:
+            parser.error("Exon overlap thresholds must be in (0, 1]")
         if args.threads < 1:
             parser.error("--threads must be positive")
         if args.min_orf_length < 1:
@@ -181,7 +219,19 @@ def main():
     setup_logging()
     args = read_parameters()
 
-    if args.subcommand == "construct":
+    if args.subcommand == "preprocess":
+        from .preprocess import preprocess
+        from pysam import SamtoolsError
+        try:
+            paths = preprocess(args.genomes, args.annotations, args.varieties, args.output,
+                               args.prefix, args.flank, args.namespace_ids)
+        except (ValueError, OSError, SamtoolsError) as exc:
+            logging.getLogger(__name__).error("Preprocessing failed: %s", exc)
+            return 1
+        logging.getLogger(__name__).info("Preprocessing complete: %s", paths["manifest"])
+        return 0
+
+    elif args.subcommand == "construct":
         unit_construct(
             all_cdna_path=args.cdna, 
             all_gdna_path=args.gdna, 
@@ -196,7 +246,9 @@ def main():
             threads=args.threads, 
             out_dir=args.output, 
             prefix=args.prefix, 
-            refer_name=args.reference
+            refer_name=args.reference,
+            gene_regions=args.gene_regions, exon_regions=args.exon_regions,
+            exon_overlap=args.exon_overlap, exon_query_overlap=args.exon_query_overlap
         )
         return 0
 
@@ -218,6 +270,9 @@ def main():
             prefix=args.prefix,
             query_to_all_bam=args.query_to_all_bam,
             history_to_query_bam=args.history_to_query_bam,
+            history_graph_cdna_path=args.history_graph_cdna,
+            gene_regions=args.gene_regions, exon_regions=args.exon_regions,
+            exon_overlap=args.exon_overlap, exon_query_overlap=args.exon_query_overlap,
         )
         return 0
 

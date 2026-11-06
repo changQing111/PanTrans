@@ -618,6 +618,8 @@ class IncrementalAppendTest(unittest.TestCase):
             "transdecoder_dir",
             "min_orf_length",
             "transdecoder_parallel",
+            "history_graph_cdna_path",
+            "gene_regions", "exon_regions", "exon_overlap", "exon_query_overlap",
         ]
         self.assertEqual(
             list(inspect.signature(pipeline.unit_append).parameters),
