@@ -447,3 +447,16 @@ GFF3和model_sources.tsv增加证据与合并原因。具体规则见[端部兼�
 ## CDS构图开发流程
 
 最新CDS图、完整cDNA注释和加速重跑入口见[流程与边界说明](docs/cds-workflow.md)。加速入口为 `scripts/restart_cds_annotation.py`。CDS流程仍是实验入口，未替换常规construct/append；已完成结果不会因代码更新自动重算。
+
+### 运行CDS构图流程
+
+先按前文执行预处理，再运行实验性CDS构图入口：
+
+```bash
+python scripts/experimental_cds_construct.py \
+  --prepared prepared/five_variety \
+  --output results/five_variety_cds \
+  --threads 32 --workers 8
+```
+
+程序使用 `<prefix>_cds.valid.fa` 比对 `<prefix>_gene.fa`（含内含子、不含上下游3 kb），筛选有编码区支持的有向图边，并生成 `pre.cluster` 和 `last.cluster`。随后将包含UTR的完整 `<prefix>_mrna.fa` 定向比对到各簇代表的未屏蔽 `<prefix>_gene3000bp_gdna.fa`，生成转录本模型并按UTR剪接结构去冗余。命令传入预处理目录，以读取CDS、坐标及模型清单。**这是实验性CDS流程，不是常规 `pantrans construct` 子命令。** 只有读取旧版schema 1预处理目录时才需要额外提供 `--annotations`。

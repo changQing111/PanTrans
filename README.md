@@ -594,3 +594,23 @@ strand orientation remain unchanged.
 The current CDS-graph/UTR-aware workflow is available through experimental scripts,
 including the accelerated annotation-only restart. See [workflow and limitations](docs/cds-workflow.md).
 The default construct/append commands have not been replaced by the CDS workflow.
+
+### Run a CDS-based construct
+
+First prepare the inputs as above, then run the experimental constructor:
+
+```bash
+python scripts/experimental_cds_construct.py \
+  --prepared prepared/five_variety \
+  --output results/five_variety_cds \
+  --threads 32 --workers 8
+```
+
+This maps `<prefix>_cds.valid.fa` against `<prefix>_gene.fa` (gene body with
+introns, no 3 kb flanks), filters coding-supported directed edges, and writes
+`pre.cluster` and `last.cluster`. It then maps full `<prefix>_mrna.fa`, including
+UTRs, to each cluster representative's unmasked `<prefix>_gene3000bp_gdna.fa`
+for transcript models and UTR-aware deduplication. The command takes the
+preprocessing directory so it can load its coordinate/model manifest. It is an
+experimental CDS workflow, separate from `pantrans construct`; `--annotations`
+is only needed for legacy schema-1 preprocessing directories.
