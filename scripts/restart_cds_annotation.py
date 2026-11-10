@@ -8,6 +8,7 @@ import tempfile, shutil, warnings
 def load_pipeline(source):
  sys.path.insert(0,str(source/'src'))
  entry=source/'cds_pipeline.py'
+ if not entry.is_file():entry=source/'src/pantrans/cds_construct.py'
  if not entry.is_file():entry=source/'scripts/experimental_cds_construct.py'
  spec=importlib.util.spec_from_file_location('original',entry);p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p);return p
 
@@ -59,13 +60,13 @@ class Pool:
 
 
 def install(p,clusters,models,gt,output):
- p.tempfile=types.SimpleNamespace(TemporaryDirectory=LocalTemporaryDirectory)
+ p.tempfile=types.SimpleNamespace(TemporaryDirectory=LocalTemporaryDirectory,gettempdir=tempfile.gettempdir)
  handles=Handles();p.pysam=types.SimpleNamespace(**{k:getattr(pysam,k) for k in dir(pysam) if not k.startswith('__')});p.pysam.FastaFile=handles.open
  original=p.annotation_cluster;unions={}
  for stage,cs in clusters.items():
   for c in cs:unions.setdefault(c[0],set()).update(c)
  db=sqlite3.connect(output/'annotation_cache.sqlite',check_same_thread=False);db.execute('PRAGMA journal_mode=WAL');db.execute('CREATE TABLE cache(hub TEXT PRIMARY KEY,payload BLOB)');lock=threading.Lock();counts=collections.Counter()
- def cached(cluster,prepared,models,gene_tids,work):
+ def cached(cluster,prepared,models,gene_tids,work,**kwargs):
   hub=cluster[0]
   with lock:row=db.execute('SELECT payload FROM cache WHERE hub=?',(hub,)).fetchone()
   if row:result=json.loads(gzip.decompress(row[0]));counts['cache_hits']+=1
@@ -79,6 +80,7 @@ def install(p,clusters,models,gt,output):
   qids={t for g in cluster[1:] for t in gene_tids[g] if models[t]['valid']};ids=qids|set(gene_tids[hub])
   return h,[m for m in candidates if m['source'] in ids],[a for a in audit if a[1] in qids],[s for s in sams if s.split('\t')[0] in qids]
  p.annotation_cluster=cached
+ if hasattr(p,'ordered_results'):return handles,db,counts
  # Preserve the validated writer verbatim except scheduling and progress flushing.
  code=inspect.getsource(p.annotation_stage)
  old='''            for start in range(0,len(clusters),workers*4):
@@ -99,16 +101,19 @@ def install(p,clusters,models,gt,output):
 
 
 def main():
- a=argparse.ArgumentParser();a.add_argument('--source',type=Path,required=True);a.add_argument('--old-results',type=Path,required=True);a.add_argument('--prepared',type=Path,required=True);a.add_argument('--annotations',type=Path,required=True);a.add_argument('--output',type=Path,required=True);a.add_argument('--workers',type=int,default=8);a.add_argument('--selection',type=Path);a.add_argument('--expected',type=Path);args=a.parse_args();args.output.mkdir(exist_ok=False);p=load_pipeline(args.source);start=time.monotonic()
+ a=argparse.ArgumentParser();a.add_argument('--source',type=Path,required=True);a.add_argument('--old-results',type=Path,required=True);a.add_argument('--prepared',type=Path,required=True);a.add_argument('--annotations',type=Path,help='Only required for schema-1 inputs');a.add_argument('--output',type=Path,required=True);a.add_argument('--workers',type=int,default=8);a.add_argument('--selection',type=Path);a.add_argument('--expected',type=Path);a.add_argument('--annotate-pre',action='store_true');args=a.parse_args();
+ if args.workers<1:a.error('workers must be positive')
+ stages=['pre','last'] if args.annotate_pre else ['last']
+ args.output.mkdir(exist_ok=False);p=load_pipeline(args.source);start=time.monotonic()
  if args.selection:
-  tasks=json.loads(args.selection.read_text())['tasks'];clusters={stage:[c for s,c in tasks if s==stage] for stage in ['pre','last']};selected={g for cs in clusters.values() for c in cs for g in c}
- else:clusters={stage:[l.split() for l in (args.old_results/(stage+'.cluster')).open()] for stage in ['pre','last']};selected=None
+  tasks=json.loads(args.selection.read_text())['tasks'];clusters={stage:[c for s,c in tasks if s==stage] for stage in stages};selected={g for cs in clusters.values() for c in cs for g in c}
+ else:clusters={stage:[l.split() for l in (args.old_results/(stage+'.cluster')).open()] for stage in stages};selected=None
  checks={}
  for name in ['cds.raw.bam','cds.filtered.bam','graph.edges.tsv','pre.cluster','last.cluster','graph.summary.json']:
   path=args.old_results/name;assert path.is_file();st=path.stat();checks[name]={'path':str(path),'size':st.st_size,'mtime_ns':st.st_mtime_ns}
  (args.output/'reused_graph.json').write_text(json.dumps(checks,indent=2))
  # Rebuild only in-memory original-annotation metadata; graph_stage is never called.
- bundle=args.output/'metadata';bundle.mkdir();regions,models,gt=p.load_bundle(args.prepared,args.annotations.read_text().splitlines(),bundle,selected)
+ bundle=args.output/'metadata';bundle.mkdir();regions,models,gt=p.load_bundle(args.prepared,args.annotations.read_text().splitlines() if args.annotations else [],bundle,selected)
  handles,db,counts=install(p,clusters,models,gt,args.output)
  summaries={}
  try:

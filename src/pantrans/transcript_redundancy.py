@@ -72,8 +72,12 @@ def deduplicate_models(candidates):
     for key, members in anchors.items():
         entries[("full", key)] = dict(members=list(members), selected=max(members, key=_rank),
                                      status="observed", compatible_sources=[], provenance=[])
+    # Compatibility requires exact CDS blocks. Avoid scanning unrelated anchors.
+    anchors_by_cds = {}
+    for key, members in anchors.items():
+        anchors_by_cds.setdefault(_blocks(members[0], "cds"), []).append((key, members))
     for short in incomplete:
-        matches = [key for key, members in anchors.items()
+        matches = [key for key, members in anchors_by_cds.get(_blocks(short, "cds"), [])
                    if any(compatible(short, full) for full in members)]
         targets = sorted({m["source"] for key in matches for m in anchors[key]})
         ev = evidence(short)

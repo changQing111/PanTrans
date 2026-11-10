@@ -230,23 +230,63 @@ def derive_last_clusters_from_pre(
                 gene_variety_dic=gene_variety_dic,
                 graph=G,
             )
-            derived_clusters = []
-            for ac in assigned_cluster:
-                if len(ac) == 1:
-                    derived_clusters.append(ac)
-                else:
-                    derived_clusters.extend(
-                        unit_recursion(
-                            G,
-                            ac,
-                            gene_len_dic,
-                            refer_name,
-                            refer_prefixes=refer_prefixes,
-                            gene_variety_dic=gene_variety_dic,
-                            bed_dic=bed_dic,
-                            main_chroms=main_chroms,
-                        )
-                    )
+            from .assign_cluster_gene import build_main_chrom_order, get_variety_n
+            main_set = set(build_main_chrom_order(main_chroms))
+
+            def split_assigned(groups):
+                result = []
+                for ac in groups:
+                    preferred = cluster[0]
+                    eligible = (bed_dic.get(preferred, (None,))[0] in main_set or
+                                not any(bed_dic.get(g, (None,))[0] in main_set for g in ac))
+                    if preferred in ac and eligible and all(
+                        g == preferred or is_bidirectionally_connected(G, preferred, g) for g in ac
+                    ):
+                        result.append([preferred] + sorted(g for g in ac if g != preferred))
+                    elif len(ac) == 1:
+                        result.append(ac)
+                    else:
+                        result.extend(unit_recursion(
+                            G, ac, gene_len_dic, refer_name, refer_prefixes=refer_prefixes,
+                            gene_variety_dic=gene_variety_dic, bed_dic=bed_dic, main_chroms=main_chroms))
+                # sort_gene removes same-start duplicates before assignment.
+                # Recover them without bypassing reciprocal-hub / variety limits.
+                present = {g for row in result for g in row}
+                for gene in annotated_cluster:
+                    if gene in present:
+                        continue
+                    variety = get_variety_n(gene, variety_li, refer_prefixes=refer_prefixes,
+                                           gene_variety_dic=gene_variety_dic)
+                    is_main = bed_dic[gene][0] in main_set
+                    candidates = []
+                    for index,row in enumerate(result):
+                        if not is_bidirectionally_connected(G, gene, row[0]):
+                            continue
+                        if is_main and variety is not None and any(
+                            bed_dic.get(member, (None,))[0] in main_set and
+                            get_variety_n(member, variety_li, refer_prefixes=refer_prefixes,
+                                          gene_variety_dic=gene_variety_dic) == variety for member in row
+                        ):
+                            continue
+                        candidates.append((cluster[0] not in row, index))
+                    if candidates:
+                        result[min(candidates)[1]].append(gene)
+                    else:
+                        result.append([gene])
+                    present.add(gene)
+                return result
+
+            derived_clusters = split_assigned(assigned_cluster)
+            # A graph-based heuristic must not introduce more groups than the
+            # corrected position-based baseline for this pre cluster.
+            baseline = assign_gene_by_chrom(
+                variety_li, annotated_cluster, bed_dic, main_chroms=main_chroms,
+                refer_prefixes=refer_prefixes, gene_variety_dic=gene_variety_dic,
+                graph=G, graph_assignment=False)
+            if {frozenset(x) for x in baseline} != {frozenset(x) for x in assigned_cluster}:
+                baseline_clusters = split_assigned(baseline)
+                if (len(baseline_clusters), sum(len(row) == 1 for row in baseline_clusters)) < (len(derived_clusters), sum(len(row) == 1 for row in derived_clusters)):
+                    derived_clusters = baseline_clusters
 
         derived_gene_set = _cluster_gene_set(derived_clusters)
         omitted_genes = [gene for gene in cluster if gene not in derived_gene_set]

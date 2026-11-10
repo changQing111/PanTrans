@@ -86,7 +86,7 @@ def prepare(a):
     run = root / (dt.datetime.now().strftime('%Y%m%dT%H%M%S') + '_' + a.preset + '_' + uuid.uuid4().hex[:8])
     base = a.base.resolve(); repo = a.repo.resolve()
     prefix = 'five_variety' if a.preset == 'construct5' else 'ten_variety'
-    inputs = {}; args = ['append' if a.preset == 'append5plus5' else 'construct']
+    inputs = {}; args = ['legacy-append' if a.preset == 'append5plus5' else 'legacy-construct']
     def add(flag, path):
         inputs[flag] = identity(path); args.extend([flag, inputs[flag]['path']])
     history_id = None

@@ -4,6 +4,7 @@ import logging
 from .pipeline import unit_construct, unit_append
 from .cnv import detect_cnv
 from .translocation import detect_translocations
+from . import cds_construct, cds_append
 
 
 def setup_logging(level=logging.INFO):
@@ -19,9 +20,11 @@ def read_parameters(argv=None):
     parser = argparse.ArgumentParser(
         description="A Scalable Approach for Constructing Pan-Genome and Pan-Transcriptome in Polyploid Organisms"
     )
+    from .version import __version__
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     # subcommands
     subparsers = parser.add_subparsers(
-        title="subcommand", description="preprocess, construct, append, cnv, or translocation", dest="subcommand"
+        title="subcommand", description="preprocess, construct, append, cnv, translocation, and explicit legacy workflows", dest="subcommand"
     )
     subparsers.required = True
 
@@ -37,9 +40,15 @@ def read_parameters(argv=None):
     prepare_parser.add_argument("--flank", type=int, default=3000, help="flank on each side, clipped at sequence boundaries (default: 3000)")
     prepare_parser.add_argument("--namespace-ids", action="store_true", help="prefix every gene ID with VARIETY__; emit original/output ID map")
 
+    cds_construct_parser = subparsers.add_parser("construct", help="Build a CDS homology graph and UTR-aware transcriptome")
+    cds_construct.configure_parser(cds_construct_parser)
+    cds_append_parser = subparsers.add_parser("append", help="Extend a CDS graph with new prepared varieties")
+    cds_append.configure_parser(cds_append_parser)
+
+    # Legacy cDNA workflows remain available only under explicit names.
     # construct subcommand
     construct_parser = subparsers.add_parser(
-        "construct", help="Construct Pan-Genome and Pan-Transcriptome"
+        "legacy-construct", help="Legacy cDNA-to-gDNA construct workflow"
     )
     construct_parser.add_argument(
         "-c", "--cdna", required=True, default=None, help="all cdna sequences path"
@@ -80,8 +89,8 @@ def read_parameters(argv=None):
 
     # append subcommand
     append_parser = subparsers.add_parser(
-        "append",
-        help="Append New Variety to Existing Pan-Genome and Pan-Transcriptome",
+        "legacy-append",
+        help="Legacy cDNA-to-gDNA append workflow",
     )
     append_parser.add_argument(
         "-c",
@@ -194,7 +203,11 @@ def read_parameters(argv=None):
             prepare_parser.error("--flank must be nonnegative")
         if not args.genomes or len(args.genomes) != len(args.annotations) or len(args.genomes) != len(args.varieties):
             prepare_parser.error("Genome, annotation and variety lists must have equal nonzero lengths")
-    if args.subcommand in ("construct", "append"):
+    if args.subcommand == "construct":
+        cds_construct.validate_args(args, cds_construct_parser)
+    elif args.subcommand == "append":
+        cds_append.validate_args(args, cds_append_parser)
+    if args.subcommand in ("legacy-construct", "legacy-append"):
         if bool(args.gene_regions) != bool(args.exon_regions):
             parser.error("--gene-regions and --exon-regions must be supplied together")
         if not 0 < args.exon_overlap <= 1 or not 0 < args.exon_query_overlap <= 1:
@@ -231,7 +244,15 @@ def main():
         logging.getLogger(__name__).info("Preprocessing complete: %s", paths["manifest"])
         return 0
 
-    elif args.subcommand == "construct":
+    elif args.subcommand in ("construct", "append"):
+        try:
+            (cds_construct.run if args.subcommand == "construct" else cds_append.run)(args)
+        except (ValueError, OSError) as exc:
+            logging.getLogger(__name__).error("%s failed: %s", args.subcommand, exc)
+            return 1
+        return 0
+
+    elif args.subcommand == "legacy-construct":
         unit_construct(
             all_cdna_path=args.cdna, 
             all_gdna_path=args.gdna, 
@@ -252,7 +273,7 @@ def main():
         )
         return 0
 
-    elif args.subcommand == "append":
+    elif args.subcommand == "legacy-append":
         unit_append(
             history_cdna_path=args.cdna,
             history_gff3_path=args.history_gff3,

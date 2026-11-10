@@ -31,7 +31,7 @@ history_gff3=${history_construct_dir}/${history_prefix}_unrenamed.gff3
 history_cdna=${history_construct_dir}/${history_prefix}_unrenamed_cdna.refer.fasta
 
 if [[ ! -s "${history_gff3}" || ! -s "${history_cdna}" ]]; then
-    "${python_bin}" -m pantrans.main construct \
+    "${python_bin}" -m pantrans.main legacy-construct \
         --name /data/changq/PanTrans/test/tmp_variety.txt \
         --cdna /data/changq/PanTrans/test/tmp_cdna.fasta \
         --gdna /data/changq/PanTrans/test/tmp_gdna.fasta \
@@ -61,7 +61,7 @@ if [[ ! -s "${history_manifest}" ]]; then
 fi
 
 /usr/bin/time -v -o "${output_dir}/append.time.txt" \
-    "${python_bin}" -m pantrans.main append \
+    "${python_bin}" -m pantrans.main legacy-append \
         --name JM22 \
         --cdna "${history_cdna}" \
         --history-gff3 "${history_gff3}" \

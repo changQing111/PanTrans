@@ -1,3 +1,5 @@
+> Legacy cDNA pipeline design reference. For the default CDS construct/append workflow in 0.8, see [README](README.md) and [CLI migration](docs/cli-migration.md).
+
 # PanTrans Building Process
 
 [中文版](BUILDING_PROCESS.zh-CN.md)

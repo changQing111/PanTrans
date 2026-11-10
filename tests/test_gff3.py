@@ -170,7 +170,7 @@ class Gff3Tests(unittest.TestCase):
         path.write_text(f"g\tPan\ttranscript\t1\t6\t.\t+\t.\t{attrs}\n"
                         f"g\tPan\texon\t1\t6\t.\t+\t.\t{attrs}\n")
         self.assertEqual(load_history_transcript_models(path)["exon_coords"], {"g.1": [(1, 6)]})
-        args = ["append", "-c", "c", "-g", "g", "-b", "b", "--query-cdna", "q",
+        args = ["legacy-append", "-c", "c", "-g", "g", "-b", "b", "--query-cdna", "q",
                 "--history-graph", "graph", "-o", "out"]
         for option in ("--history-gff3", "--history-gtf"):
             self.assertEqual(read_parameters(args + [option, str(path)]).history_gff3, str(path))

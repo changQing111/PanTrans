@@ -196,7 +196,7 @@ class AppendCliContractTest(unittest.TestCase):
     def test_append_accepts_history_graph_and_combined_bed(self):
         args = pantrans_main.read_parameters(
             [
-                "append",
+                "legacy-append",
                 "--cdna", "history.unrenamed.cdna.fasta",
                 "--history-gff3", "history.unrenamed.gff3",
                 "--query-cdna", "query.cdna.fasta",
@@ -221,7 +221,7 @@ class AppendCliContractTest(unittest.TestCase):
 
     def test_append_requires_history_gff3_and_query_cdna(self):
         base_args = [
-            "append",
+            "legacy-append",
             "--cdna", "history.unrenamed.cdna.fasta",
             "--history-gff3", "history.unrenamed.gff3",
             "--query-cdna", "query.cdna.fasta",
@@ -241,7 +241,7 @@ class AppendCliContractTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             pantrans_main.read_parameters(
                 [
-                    "append",
+                    "legacy-append",
                     "--cdna", "history.unrenamed.cdna.fasta",
                     "--history-gff3", "history.unrenamed.gff3",
                     "--query-cdna", "query.cdna.fasta",
@@ -256,7 +256,7 @@ class AppendCliContractTest(unittest.TestCase):
     def test_construct_cli_contract_is_unchanged(self):
         args = pantrans_main.read_parameters(
             [
-                "construct",
+                "legacy-construct",
                 "--cdna", "all.cdna.fasta",
                 "--gdna", "all.gdna.fasta",
                 "--bed", "all.bed",
@@ -266,7 +266,7 @@ class AppendCliContractTest(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.subcommand, "construct")
+        self.assertEqual(args.subcommand, "legacy-construct")
         self.assertIsNone(args.bam)
 
 

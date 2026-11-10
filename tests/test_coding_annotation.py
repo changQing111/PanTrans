@@ -178,7 +178,7 @@ class CodingAnnotationTests(unittest.TestCase):
         self.assertIn('ID=g.1;Parent=g', unrenamed)
 
     def test_cli(self):
-        base = ["construct", "-c", "c", "-g", "g", "-b", "b", "-r", "r", "-p", "p", "-o", "o"]
+        base = ["legacy-construct", "-c", "c", "-g", "g", "-b", "b", "-r", "r", "-p", "p", "-o", "o"]
         self.assertFalse(read_parameters(base).annotate_cds)
         self.assertFalse(read_parameters(base).transdecoder_parallel)
         args = read_parameters(base + ["--annotate-cds", "--transdecoder-parallel", "-t", "4"])

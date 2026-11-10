@@ -5,6 +5,7 @@ from functools import lru_cache
 import json
 from pathlib import Path
 import shutil
+import os
 
 from Bio import SeqIO
 
@@ -25,7 +26,8 @@ def prepared_file(prepared, key):
     return Path(prepared) / names.get(key, legacy.get(key, key))
 
 
-def load_prepared_bundle(prepared, output, selected=None):
+def load_prepared_bundle(prepared, output, selected=None, graph_fasta_mode="copy"):
+    if graph_fasta_mode not in ("copy", "link"):raise ValueError("Invalid graph FASTA mode")
     regions = {}
     with prepared_file(prepared, "genes").open() as handle:
         for row in csv.DictReader(handle, delimiter="\t"):
@@ -52,7 +54,10 @@ def load_prepared_bundle(prepared, output, selected=None):
     for key, filename in (("gene", "body.fa"), ("cds_valid", "cds.fa")):
         source, destination = prepared_file(prepared, key), Path(output) / filename
         if selected is None:
-            shutil.copyfile(source, destination)
+            if graph_fasta_mode == "link":
+                destination.symlink_to(os.path.relpath(source.resolve(), destination.parent.resolve()))
+            else:
+                shutil.copyfile(source, destination)
         else:
             with source.open() as src, destination.open("w") as dst:
                 for record in SeqIO.parse(src, "fasta"):

@@ -6,7 +6,7 @@ from pantrans.main import read_parameters
 
 
 def test_cli_separates_annotation_and_graph_queries():
-    args = read_parameters(['append', '--cdna', 'final.fa', '--history-gff3', 'final.gff3',
+    args = read_parameters(['legacy-append', '--cdna', 'final.fa', '--history-gff3', 'final.gff3',
                             '--history-graph-cdna', 'original.fa', '--query-cdna', 'new.fa',
                             '--gdna', 'new.gdna.fa', '--bed', 'all.bed',
                             '--history-graph', 'old.json', '--output', 'out'])

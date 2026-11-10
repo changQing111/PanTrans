@@ -105,7 +105,7 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
         self.assertIn("--identity-min 0.90", script)
         self.assertIn("--soft-clip-max 0.10", script)
         self.assertIn("history_construct_dir=", script)
-        self.assertIn("-m pantrans.main construct", script)
+        self.assertIn("-m pantrans.main legacy-construct", script)
         self.assertIn(
             "test_pantrans_cdna_align_gdna.filtered.bam", script
         )
@@ -134,8 +134,8 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
         ) as handle:
             version_module = handle.read()
 
-        self.assertIn('version = "0.7.0"', pyproject)
-        self.assertIn('__version__ = "0.7.0"', version_module)
+        self.assertIn('version = "0.8.0"', pyproject)
+        self.assertIn('__version__ = "0.8.0"', version_module)
 
 
 if __name__ == "__main__":
