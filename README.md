@@ -2,136 +2,184 @@
 
 [中文](README.zh-CN.md)
 
-PanTrans **0.8.0** constructs and extends a CDS homology graph and produces a
-UTR-aware pan-transcriptome. `pantrans construct` and `pantrans append` now run
-the CDS workflow directly from the installed Python package. The former
-experimental script names remain compatibility wrappers.
+## Installation
 
-## Install
+Run these commands on Linux or in WSL. Conda installs Python and the alignment
+tools; pip installs PanTrans and its Python dependencies.
 
 ```bash
-pip install .
+conda create -n pantrans -c conda-forge -c bioconda \
+  python=3.12 pip minimap2=2.30 samtools=1.22.1
+conda activate pantrans
+
+git clone --branch codex/cds-graph-utr-aware-dedup \
+  https://github.com/changQing111/PanTrans.git
+cd PanTrans
+python -m pip install .
+
 pantrans --version
+minimap2 --version
+samtools --version
+pantrans --help
 ```
 
-Python 3.8+, pysam, NetworkX and Biopython are required. Install minimap2 and
-samtools separately and put them on PATH. TransDecoder is not required by the
-CDS workflow; it is used only by optional legacy prediction.
+For an editable development installation, use `python -m pip install -e .`.
+TransDecoder is needed only for `--annotate-cds` in the legacy commands.
 
-## Prepare and construct
+## `preprocess`: prepare genomes and annotations
+
+Provide uncompressed genome FASTAs, GFF3 annotations containing CDS features, and
+variety names in matching order. Replace the example paths with your own files.
 
 ```bash
 pantrans preprocess \
-  --genome-list genomes.txt --annotation-list annotations.txt \
-  --variety-list varieties.txt --flank 3000 \
-  --prefix sample --output prepared
-
-pantrans construct --prepared prepared --output construct_results \
-  --threads 32 --workers 8
+  --genomes data/CS.fa data/ZM366.fa \
+  --annotations data/CS.gff3 data/ZM366.gff3 \
+  --varieties CS ZM366 \
+  --namespace-ids --flank 3000 \
+  --prefix Pan --output prepared
 ```
 
-The parallel lists contain one genome FASTA, GFF3 path and variety name per line
-in matching order. Use uncompressed genome FASTAs. Preprocessing emits gene-body
-DNA, flanked gene DNA, complete spliced cDNA, valid CDS, coordinate/model tables,
-and a schema-2 manifest. Keep original globally unique IDs, or consistently use
-`--namespace-ids` for all batches. See [input details](docs/preprocess-cds-inputs.md).
-
-Construct maps **all valid CDS against all unflanked gene bodies**. Graph edges
-require identity and both CDS-overlap coverages >=90%; coding indels and splice
-structure differences do not veto graph edges. Coverage counts aligned bases
-inside a target isoform's annotated CDS, not arbitrary aligned gene-body bases.
-Unmapped, reverse, supplementary and missing-NM records remain excluded.
-
-SCCs are split into pre clusters, then the graph-supported copy assignment
-produces last clusters. The current policy prefers reference variety **CS** on
-ties and recognizes wheat **Chr1A–Chr7D** (plus aliases) as main chromosomes.
-This policy is fixed in this release; the standalone ABD repartition experiment
-is not the default. See [assignment rules](docs/last-assignment-graph-support.md).
-
-Only **last** is annotated by default (`--annotate-pre` additionally annotates
-pre). Full cDNA is transferred to each hub's flanked DNA, combined with original
-hub models and deduplicated by CDS/exon/splice evidence. Unique compatible partial
-models can fold into full structures; ambiguous/unresolved evidence remains
-explicit. **Annotation transfer still checks coding structure and ORF validity
-more strictly than graph construction**. Graph homology alone does not guarantee
-that every isoform transfers. See [graph policy](docs/cds-homology-v2.md).
-
-## Append prepared varieties
+Alternatively, use three text files, one path or name per line in matching order.
+Genome and annotation paths are relative to their respective list files.
 
 ```bash
-pantrans append \
-  --history-results construct_results --history-prepared prepared \
-  --query-prepared new_prepared --output append_results \
+pantrans preprocess \
+  --genome-list genomes.txt \
+  --annotation-list annotations.txt \
+  --variety-list varieties.txt \
+  --namespace-ids --flank 3000 \
+  --prefix Pan --output prepared_from_lists
+```
+
+`--namespace-ids` prefixes IDs with variety names. Use the same ID policy for
+historical and new batches, and retain the complete prepared directories.
+
+## `construct`: build and annotate a CDS graph
+
+```bash
+pantrans construct \
+  --prepared prepared \
+  --output construct_results \
   --threads 32 --workers 8
 ```
 
-Append reuses the complete historical graph, aligns new CDS to all gene bodies
-and historical CDS to new gene bodies, then recomputes clusters and last
-annotation. It requires disjoint new varieties and gene/transcript IDs and
-compatible schema-2 preparation. Original historical inputs are required;
-representative-only sequences are insufficient.
+The default annotates `last.cluster` and writes `last.gff3` and `last.cdna.fa`.
+Add `--annotate-pre` to also annotate `pre.cluster`. `--threads` controls graph
+alignment; `--workers` controls annotation concurrency. Use a new output directory.
+The current command prefers CS as the reference and uses wheat Chr1A–Chr7D as
+main chromosomes.
 
-For another generation:
+To rerun annotation using the existing graph and the same prepared inputs:
+
+```bash
+pantrans construct \
+  --prepared prepared \
+  --reuse-graph construct_results \
+  --output reannotated_results \
+  --workers 8
+```
+
+## `append`: add new varieties
+
+Prepare only the new varieties, then provide the historical results and their
+original prepared inputs. New variety names and gene/transcript IDs must not
+overlap with the historical batch.
+
+```bash
+pantrans preprocess \
+  --genomes data/JM22.fa \
+  --annotations data/JM22.gff3 \
+  --varieties JM22 \
+  --namespace-ids --flank 3000 \
+  --prefix Pan --output new_prepared
+
+pantrans append \
+  --history-results construct_results \
+  --history-prepared prepared \
+  --query-prepared new_prepared \
+  --output append_results \
+  --threads 32 --workers 8
+```
+
+For another append, prepare the next batch as `next_prepared` and use the previous
+append's `merged_prepared` as the historical input:
 
 ```bash
 pantrans append \
   --history-results append_results \
   --history-prepared append_results/merged_prepared \
-  --query-prepared next_prepared --output next_append_results
+  --query-prepared next_prepared \
+  --output next_append_results \
+  --threads 32 --workers 8
 ```
 
-The CDS graph package checks input/edge hashes and mapping/filter policy. Old
-cDNA `.graph.json` packages and CDS v1 packages are not interchangeable with v2.
-Unpackaged historical CDS raw-BAM results may be explicitly imported using
-`--import-legacy-history`; missing historical coordinate/mapping provenance is
-recorded as assumed. See [append contracts](docs/cds-append.md).
+## `cnv`: screen nearby same-variety gene copies
 
-Incremental versus direct construction is **not guaranteed identical** because
-minimap2's emitted candidates depend on the target set. Compare biological
-outputs when validating a new dataset or policy.
-
-## Outputs and execution
-
-| Output | Meaning |
-|---|---|
-| `pre.cluster`, `last.cluster` | One cluster per line; first gene is the hub |
-| `graph.edges.tsv`, `graph.summary.json` | Directed homology graph and counts |
-| `cds.graph.json` | CDS graph/input policy and integrity manifest |
-| `last.gff3`, `last.cdna.fa` | Final annotations and reconstructed cDNA |
-| `last.annotation.bam` | Accepted transfer evidence before deduplication |
-| `last.model_sources.tsv`, `last.alignment_status.tsv` | Source/merge evidence and transfer status |
-| `last.evidence.sqlite`, `last.cache_stats.json` | Content-addressed pre-dedup transfer cache and counters |
-| `last.summary.json`, `summary.json` | Counts and completion summary |
-| `progress.json`, `timings.json` | Annotation progress and stage times |
-
-GFF3 coordinates are **relative to the hub's gene-oriented flanked DNA**, not
-original chromosome coordinates. Transcript IDs are locally assigned `hub.N`;
-use the source table for provenance. Partial models are retained explicitly.
-Graph-input `body.fa` and `cds.fa` are links to prepared data; keep those sources.
-Choose a new output directory for each run.
-
-`--threads` controls graph mapping; `--workers` controls annotation workers.
-Append automatically reuses a historical `last.evidence.sqlite` when available;
-additional caches use `--history-evidence-cache`. `--no-evidence-cache` disables
-caching. Deduplication is recomputed with all current candidates. `--local-fasta`
-is optional local-reference staging and is not enabled by default. See
-[performance and validation](docs/cds-performance.md).
-
-`construct --reuse-graph PATH` performs annotation-only restart. It preserves
-original graph provenance; unpackaged history has unverified policy and is
-reported with unknown graph thresholds. Subset `--genes` runs and annotation-only
-restarts do not produce a new full-dataset graph package for append.
-
-## Migration and legacy commands
-
-Old cDNA arguments (`--cdna`, `--gdna`, `--bed`, `--bam`, `--annotate-cds`) belong to
-`pantrans legacy-construct` / `pantrans legacy-append`. They are not silently
-interpreted as CDS inputs. See [migration](docs/cli-migration.md) and
-[legacy reference](LEGACY.md). `preprocess`, `cnv` and `translocation` remain
-available. Scientific visualization scripts remain standalone utilities.
+Use pre clusters and the complete gene BED from the matching dataset.
+BED column 4 contains gene IDs; column 5 contains variety names.
 
 ```bash
-pantrans construct --help
-pantrans append --help
-pantrans legacy-construct --help
+pantrans cnv \
+  --pre-cluster construct_results/pre.cluster \
+  --bed prepared/Pan_genes.bed \
+  --reference CS \
+  --max-gap 1000000 \
+  --output cnv.genes.txt
 ```
+
+## `translocation`: screen candidate chromosome changes
+
+Create `main_chroms.txt` with one chromosome name per line, matching BED column 1.
+Use clusters, edges and the complete BED from the same dataset.
+
+```bash
+pantrans translocation \
+  --pre-cluster construct_results/pre.cluster \
+  --bed prepared/Pan_genes.bed \
+  --edges construct_results/graph.edges.tsv \
+  --main-chroms main_chroms.txt \
+  --reference CS \
+  --min-anchor-genes 3 --max-gap 1000000 --max-skipped-genes 5 \
+  --output-prefix screening
+```
+
+Outputs are `screening.translocation.genes.tsv` and
+`screening.translocation.blocks.tsv`. Add `--allow-reverse` for blocks in reverse
+orientation, or `--include-unplaced` to report unplaced gene pairs.
+
+## `legacy-construct`: build with the cDNA workflow
+
+```bash
+pantrans legacy-construct \
+  --cdna prepared/Pan_mrna.fa \
+  --gdna prepared/Pan_gene3000bp_gdna.fa \
+  --bed prepared/Pan_genes.bed \
+  --gene-regions prepared/Pan_gene_regions.tsv \
+  --exon-regions prepared/Pan_exon_regions.tsv \
+  --reference CS --prefix Pan \
+  --output legacy_results --threads 32
+```
+
+## `legacy-append`: extend a legacy cDNA graph
+
+Use the historical unrenamed GFF3/cDNA pair and its graph package. Prepare
+`combined_pre_and_new.bed` with the historical pre-cluster representatives and all
+new genes; IDs and variety labels must match the sequence inputs.
+
+```bash
+pantrans legacy-append \
+  --cdna legacy_results/Pan_unrenamed_cdna.refer.fasta \
+  --history-gff3 legacy_results/Pan_unrenamed.gff3 \
+  --history-graph legacy_results/Pan.graph.json \
+  --query-cdna new_prepared/Pan_mrna.fa \
+  --gdna new_prepared/Pan_gene3000bp_gdna.fa \
+  --bed combined_pre_and_new.bed \
+  --gene-regions prepared/Pan_gene_regions.tsv new_prepared/Pan_gene_regions.tsv \
+  --exon-regions prepared/Pan_exon_regions.tsv new_prepared/Pan_exon_regions.tsv \
+  --prefix Append --output legacy_append_results --threads 32
+```
+
+For optional CDS/UTR prediction, install TransDecoder separately and add
+`--annotate-cds --transdecoder-dir /path/to/TransDecoder` to either legacy command.
+Use `pantrans <subcommand> --help` to list all options for a command.
