@@ -2,6 +2,9 @@
 
 [English](README.md)
 
+本文档对应 [`codex/longest-cds-synteny` 分支](https://github.com/changQing111/PanTrans/tree/codex/longest-cds-synteny)。
+当前子命令：`preprocess`、`construct`、`append`、`cnv` 和 `synteny`。
+
 ## 安装
 
 在 Linux 或 WSL 中执行以下命令。Conda 安装 Python 和比对工具，pip 安装 PanTrans 及其 Python 依赖。
@@ -139,10 +142,7 @@ pantrans synteny \
 append结果使用其`merged_prepared/`作为`--prepared`。默认运行全部步骤；大数据可用
 `--stage index/shard/pair/collect`分阶段调度，pair用`--pair-index`选择。只读现有图，不重新比对，
 不改变pre/last。输出区块、锚点、位置支持、完整二进制候选及汇总。见[共线性说明](docs/synteny.md)。
-原`translocation`命令已移除；旧分析脚本仍可读取已有易位报告。
-
-当前仅保留 `preprocess`、`construct`、`append`、`cnv` 和 `synteny` 五个子命令。
-`legacy-construct` 和 `legacy-append` 已移除。使用 `pantrans <子命令> --help` 查看参数。
+使用 `pantrans <子命令> --help` 查看参数。
 
 ## 致谢
 

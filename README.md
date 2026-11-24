@@ -2,6 +2,9 @@
 
 [中文](README.zh-CN.md)
 
+This README describes the [`codex/longest-cds-synteny` branch](https://github.com/changQing111/PanTrans/tree/codex/longest-cds-synteny).
+Available commands: `preprocess`, `construct`, `append`, `cnv` and `synteny`.
+
 ## Installation
 
 Run these commands on Linux or in WSL. Conda installs Python and the alignment
@@ -168,11 +171,7 @@ For append output, use its `merged_prepared/` directory. Large runs can use stag
 command reads the existing graph without realignment or changing pre/last
 clusters. Outputs include blocks, anchors, positional support, complete binary
 candidates and summaries. See [synteny details](docs/synteny.md).
-The `translocation` command has been removed; historical report readers remain.
-
-Use `pantrans <subcommand> --help` for command options. The cDNA legacy commands
-`legacy-construct` and `legacy-append` have been removed. Current commands are
-`preprocess`, `construct`, `append`, `cnv` and `synteny`.
+Use `pantrans <subcommand> --help` for command options.
 
 ## Acknowledgements
 

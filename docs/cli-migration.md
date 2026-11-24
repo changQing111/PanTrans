@@ -12,71 +12,20 @@ construct/append均采用最长有效CDS、按目标品种、f20000 N2000的CDS�
 固定的历史源码快照不因本次修改而变化。
 
 旧版cDNA专用实验预设和SLURM验证脚本已标记退役，不能用于创建当前构建任务。
-下方为之前版本的迁移及验证记录，命令名仅作历史参考。
 
----
+## 当前迁移方式
 
-# Construct/append CLI migration in 0.8.0
+旧版cDNA命令没有同参数兼容入口。请从基因组和GFF3重新运行preprocess，获得
+最长有效CDS及完整模型后，使用construct建立新版图。新增品种使用相同预处理策略后
+通过append扩展，连续追加使用上一代merged_prepared/作为历史输入。
 
-**2026-11-23:** construct has moved to longest-valid-CDS, per-variety N2000
-mapping. Append now shares this profile and accepts compatible N2000 graph packages.
-Older N100 histories must be rebuilt rather than imported under the new policy.
-The compatibility/equivalence checks below describe the earlier N100 workflow.
-See [current construct](construct-longest-cds.md).
+实验脚本experimental_cds_construct.py和experimental_cds_append.py仍是对应正式
+子命令的转发入口，不是单独的算法实现。当前新构图需要新版schema-2输入；注释重启
+仍通过--reuse-graph使用与历史图对应的完整预处理数据，不重新比对构图。
 
-The official installed commands now use the CDS workflow:
+construct/append共用90/90/90 CDS同源过滤，默认只注释last。cDNA转移仍采用更严格的
+编码结构和ORF检查，之后重新进行UTR去冗余。完整图包绑定输入/边/策略哈希，保留
+父代来源；不能将旧N100图或不兼容输入伪装为新版N2000结果。
 
-| Previous entry | 0.8 command |
-|---|---|
-| `python scripts/experimental_cds_construct.py --prepared P --output O` | `pantrans construct --prepared P --output O` |
-| `python scripts/experimental_cds_append.py ...` | `pantrans append ...` |
-| `pantrans construct --cdna C --gdna G --bed B ...` | `pantrans legacy-construct --cdna C --gdna G --bed B ...` |
-| `pantrans append --history-graph ... --cdna ...` | `pantrans legacy-append --history-graph ... --cdna ...` |
-
-This is an explicit CLI contract change. Legacy arguments are not accepted or
-silently routed by the new default commands. Historical function implementations
-remain in `pipeline.py`; the new implementations are `pantrans.cds_construct`
-and `pantrans.cds_append`. Experimental script paths are forwarding wrappers,
-not separate algorithm implementations. Running immutable historical source
-snapshots continues to use their original code.
-
-`preprocess` and `cnv` retain their interfaces. The `translocation` command
-has been removed; `synteny` now provides all-pair gene-order block analysis
-from complete prepared inputs, pre clusters and graph edges (see synteny.md). Legacy experiment
-runners/validation scripts now call the explicit legacy subcommands. Full new
-constructs publish `cds.graph.json`; append checks schema, hashes and policy and
-can chain through its `merged_prepared/` directory.
-
-The CDS v2 graph uses 90% identity and both CDS-overlap coverages, without coding
-splice/indel vetoes. Only last is annotated by default. UTR-aware structural
-deduplication, persistent readers, bounded scheduling and transfer-evidence caches
-are shared between new construct and append. Annotation transfer itself retains
-strict coding-structure and ORF checks; the relaxed graph filter is not reused as
-an annotation acceptance rule.
-
-The current reference/chromosome policy remains wheat-specific (CS, Chr1A–Chr7D).
-It was not generalized as part of this CLI migration. The independent ABD-only
-partition experiment is not enabled by these commands.
-
-Compatibility script options remain supported, including optional schema-1
-`--annotations`, `--genes`, `--annotate-pre`, and annotation-only `--reuse-graph`.
-Schema-2 full runs are the supported source of graph packages for append.
-Packaged graph restarts validate current graph/input policy; unpackaged restarts
-record unverified graph thresholds rather than attributing the current defaults
-to an old graph. An append graph consists of multiple generations' alignments,
-so the older construct raw-BAM restart interface is not a general append resume.
-
-Validation includes installed-wheel console entrypoints outside the repository,
-real minimap2 construct/append runs, repeat append, source/installed output
-comparison and legacy parser regressions. Benchmark datasets and generated
-experiment output are not shipped in the Python package.
-
-
-Validation for this migration: 252 tests and 837 subtests passed on Linux with
-real minimap2/samtools integration enabled. A built 0.8.0 wheel was installed in
-an isolated virtual environment and its console commands were exercised from a
-temporary directory with PYTHONPATH removed. Installed preprocess, construct,
-append and a direct combined construct produced matching graph/cluster/GFF3/cDNA
-and accepted alignment outputs on the smoke dataset. Console --version and
-explicit legacy help were checked. This verifies package/CLI integration, not
-universal full-cohort equivalence of incremental and direct alignment.
+共线性命令读取完整预处理数据、pre.cluster和graph.edges.tsv，生成两两品种区块、
+锚点和位置支持，不修改pre/last。当前参考/主染色体默认仍为小麦CS及Chr1A–Chr7D。
