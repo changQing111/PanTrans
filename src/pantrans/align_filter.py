@@ -230,7 +230,7 @@ def validate_resume_bam(bam_path, expected_query_ids, expected_target_lengths, l
         raise ValueError(f"{label} missing expected query transcripts: {missing}")
     return provenance
 
-def minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
+def minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=None, options=None):
     """Map through a checked pipe, publishing the BAM only after both tools exit."""
     if threads < 1:
         raise ValueError("threads must be at least 1")
@@ -253,7 +253,7 @@ def minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
             masked = os.path.join(work_dir, "masked.fa")
             exon_policy.mask(gdna_path, masked)
             gdna_path = masked
-        map_cmd = ["minimap2"] + shlex.split(MINIMAP2_OPTIONS) + [
+        map_cmd = ["minimap2"] + shlex.split(MINIMAP2_OPTIONS if options is None else options) + [
             "--split-prefix", os.path.join(work_dir, "mm2"),
             "-t", str(mapping_threads), os.fspath(gdna_path), os.fspath(cdna_path),
         ]
@@ -277,6 +277,7 @@ def minimap2_map(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
                         process.kill()
                         process.wait()
         os.replace(partial_bam, bam_path)
+    return dict(minimap2=map_cmd, samtools=view_cmd)
 
 def minimap2_map_rescue(cdna_path, gdna_path, threads, bam_path, exon_policy=None):
     """Use the same bounded batches and thread allocation for rescue mappings."""

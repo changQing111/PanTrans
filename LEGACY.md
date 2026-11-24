@@ -1,3 +1,5 @@
+> Current CLI: legacy-construct and legacy-append have been removed. Commands below document historical workflows and require the corresponding old code version.
+
 > Historical cDNA workflow reference. PanTrans 0.8 uses CDS by default; see [current CLI](README.md). The historical development notes below are not the current CDS command contract.
 
 # PanTrans

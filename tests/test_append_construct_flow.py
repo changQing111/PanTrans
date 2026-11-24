@@ -193,81 +193,12 @@ class MergeBamFilesTest(unittest.TestCase):
 
 
 class AppendCliContractTest(unittest.TestCase):
-    def test_append_accepts_history_graph_and_combined_bed(self):
-        args = pantrans_main.read_parameters(
-            [
-                "legacy-append",
-                "--cdna", "history.unrenamed.cdna.fasta",
-                "--history-gff3", "history.unrenamed.gff3",
-                "--query-cdna", "query.cdna.fasta",
-                "--gdna", "query.gdna.fasta",
-                "--bed", "combined.bed",
-                "--history-graph", "history.graph.json",
-                "--output", "append_out",
-            ]
-        )
-
-        self.assertEqual(args.bed, "combined.bed")
-        self.assertEqual(args.cdna, "history.unrenamed.cdna.fasta")
-        self.assertEqual(args.history_gff3, "history.unrenamed.gff3")
-        self.assertEqual(args.query_cdna, "query.cdna.fasta")
-        self.assertEqual(args.history_graph, "history.graph.json")
-        self.assertIsNone(args.query_to_all_bam)
-        self.assertIsNone(args.history_to_query_bam)
-        self.assertFalse(hasattr(args, "refer_bed"))
-        self.assertFalse(hasattr(args, "refer_cluster"))
-        self.assertFalse(hasattr(args, "refer_cdna"))
-        self.assertFalse(hasattr(args, "refer_gdna"))
-
-    def test_append_requires_history_gff3_and_query_cdna(self):
-        base_args = [
-            "legacy-append",
-            "--cdna", "history.unrenamed.cdna.fasta",
-            "--history-gff3", "history.unrenamed.gff3",
-            "--query-cdna", "query.cdna.fasta",
-            "--gdna", "query.gdna.fasta",
-            "--bed", "combined.bed",
-            "--history-graph", "history.graph.json",
-            "--output", "append_out",
-        ]
-        for option in ("--history-gff3", "--query-cdna"):
-            with self.subTest(option=option), self.assertRaises(SystemExit):
-                option_index = base_args.index(option)
-                pantrans_main.read_parameters(
-                    base_args[:option_index] + base_args[option_index + 2 :]
-                )
-
-    def test_append_rejects_stale_representative_sequence_options(self):
-        with self.assertRaises(SystemExit):
-            pantrans_main.read_parameters(
-                [
-                    "legacy-append",
-                    "--cdna", "history.unrenamed.cdna.fasta",
-                    "--history-gff3", "history.unrenamed.gff3",
-                    "--query-cdna", "query.cdna.fasta",
-                    "--gdna", "query.gdna.fasta",
-                    "--bed", "combined.bed",
-                    "--history-graph", "history.graph.json",
-                    "--refer_cdna", "obsolete.cdna.fasta",
-                    "--output", "append_out",
-                ]
-            )
-
-    def test_construct_cli_contract_is_unchanged(self):
-        args = pantrans_main.read_parameters(
-            [
-                "legacy-construct",
-                "--cdna", "all.cdna.fasta",
-                "--gdna", "all.gdna.fasta",
-                "--bed", "all.bed",
-                "--reference", "RefA",
-                "--prefix", "Pan",
-                "--output", "construct_out",
-            ]
-        )
-
-        self.assertEqual(args.subcommand, "legacy-construct")
-        self.assertIsNone(args.bam)
+    def test_removed_legacy_commands_are_rejected(self):
+        for name in ('legacy-construct', 'legacy-append'):
+            for extra in ([], ['--help'], ['--cdna', 'old.fa', '--output', 'out']):
+                with self.subTest(name=name, extra=extra), self.assertRaises(SystemExit) as error:
+                    pantrans_main.read_parameters([name] + extra)
+                self.assertEqual(error.exception.code, 2)
 
 
 class AppendFlowUnitTest(unittest.TestCase):

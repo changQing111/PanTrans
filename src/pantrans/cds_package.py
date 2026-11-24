@@ -21,30 +21,40 @@ def digest(path):
     return h.hexdigest()
 
 
-def prepared_identity(prepared, hashes=None):
+CONSTRUCT_OPTIONS = "-ax splice:hq -uf -I 2G -K 50M --secondary=yes -f 20000 -N 2000"
+
+
+def prepared_identity(prepared, hashes=None, longest=False):
     data = manifest(str(Path(prepared).resolve()))
     if data.get('schema_version') != 2:
         raise ValueError('CDS append requires schema-2 preprocessing')
-    return dict(files={key: (hashes[key] if hashes is not None else digest(prepared_file(prepared, key))) for key in KEYS},
+    keys = KEYS + (('cds_longest', 'cds_longest_selection') if longest else ())
+    return dict(files={key: (hashes[key] if hashes is not None else digest(prepared_file(prepared, key))) for key in keys},
                 varieties=data['varieties'], cds_validation=data['cds_validation'])
 
 
-def mapping_policy():
-    return dict(options=MINIMAP2_OPTIONS,
+def mapping_policy(longest=False):
+    data = dict(options=CONSTRUCT_OPTIONS if longest else MINIMAP2_OPTIONS,
                 minimap2_version=subprocess.check_output(['minimap2','--version'],text=True).strip())
+    if longest:
+        data.update(query='longest-valid-CDS-per-gene', targets='per-variety-complete-gene-bodies',
+                    within_variety=True, tie_break='output-transcript-ID-ascending')
+    return data
 
 
-def write_package(output, prepared, kind, parents=None, prepared_hashes=None):
+def write_package(output, prepared, kind, parents=None, prepared_hashes=None, longest=False):
     data = dict(schema_version=1, kind='pantrans-cds-graph', operation=kind,
-                policy=POLICY, mapping=mapping_policy(), prepared=prepared_identity(prepared, prepared_hashes),
+                policy=POLICY, mapping=mapping_policy(longest), prepared=prepared_identity(prepared, prepared_hashes, longest),
                 prepared_path=str(Path(prepared).resolve()),
                 edges=dict(path='graph.edges.tsv',sha256=digest(output/'graph.edges.tsv')),
                 parents=parents or [])
+    if longest:
+        data['target_manifest'] = dict(path='graph.mapping.json', sha256=digest(output/'graph.mapping.json'))
     (output/'cds.graph.json').write_text(json.dumps(data,indent=2)+'\n')
     return data
 
 
-def load_package(history, prepared):
+def load_package(history, prepared, longest=False):
     history = Path(history)
     path = history/'cds.graph.json'
     if not path.is_file():
@@ -52,11 +62,13 @@ def load_package(history, prepared):
     data=json.loads(path.read_text())
     if data.get('schema_version') != 1 or data.get('kind') != 'pantrans-cds-graph':
         raise ValueError('Not a supported CDS graph package')
-    if data['policy'] != POLICY or data['mapping'] != mapping_policy():
-        raise ValueError('Historical CDS filtering or mapping policy differs')
-    if data['prepared'] != prepared_identity(prepared):
+    if data['policy'] != POLICY or data['mapping'] != mapping_policy(longest):
+        raise ValueError('Historical CDS filtering or mapping policy differs; use compatible longest-CDS per-variety N2000 history for current construct/append')
+    if data['prepared'] != prepared_identity(prepared, longest=longest):
         raise ValueError('Historical prepared inputs changed or do not match the graph')
     edges=history/data['edges']['path']
     if digest(edges) != data['edges']['sha256']:
         raise ValueError('Historical graph edges changed')
+    if longest and digest(history/data['target_manifest']['path']) != data['target_manifest']['sha256']:
+        raise ValueError('Historical target mapping manifest changed')
     return data,edges

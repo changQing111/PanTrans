@@ -2,6 +2,11 @@
 
 # CDS graph and UTR-aware annotation development branch
 
+**2026-11-23 update:** construct now uses preprocessed longest valid CDS per gene,
+per-variety complete targets and `-f 20000 -N 2000`. Historical settings below
+describe prior runs. See [current construct](construct-longest-cds.md). Append now shares this profile and reuses only historical-to-historical graph
+edges; details are in [CDS append](cds-append.md).
+
 This branch contains the current implementation and experimental workflow:
 
 1. `pantrans preprocess` writes complete cDNA, gene-body gDNA, flanked gDNA,

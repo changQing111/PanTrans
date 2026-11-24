@@ -16,7 +16,8 @@ authors = [
 dependencies = [
   "pysam",
   "networkx",
-  "biopython"
+  "biopython",
+  "numpy>=1.24"
 ]
 
 [project.scripts]

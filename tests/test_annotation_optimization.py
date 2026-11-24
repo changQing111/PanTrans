@@ -37,7 +37,7 @@ class AnnotationOptimizationTests(unittest.TestCase):
         for extra,expected in [([],['last']),(['--annotate-pre'],['pre','last'])]:
             with tempfile.TemporaryDirectory() as td:
                 out=Path(td)/'out'
-                with patch.object(sys,'argv',['pipeline','--prepared',td,'--output',str(out)]+extra),patch.object(p,'load_bundle',return_value=({}, {}, {})),patch.object(p,'graph_stage',return_value=([['a']],[['b']])),patch.object(p,'annotation_stage',return_value={}) as annotate,patch('pantrans.cds_package.write_package'):
+                with patch.object(sys,'argv',['pipeline','--prepared',td,'--output',str(out)]+extra),patch.object(p,'require_longest_inputs'),patch.object(p,'load_bundle',return_value=({}, {}, {})),patch.object(p,'per_variety_graph_stage',return_value=([['a']],[['b']])),patch.object(p,'annotation_stage',return_value={}) as annotate,patch('pantrans.cds_package.write_package'),patch('pantrans.cds_outputs.export_last',return_value={}):
                     p.main()
                 self.assertEqual([c.args[0] for c in annotate.call_args_list],expected)
 
@@ -55,7 +55,7 @@ class AnnotationOptimizationTests(unittest.TestCase):
             for name in ('cds.raw.bam','cds.filtered.bam','graph.edges.tsv','graph.summary.json'):
                 (source/name).write_text('fixture')
             before={f.name:f.read_bytes() for f in source.iterdir()}
-            with patch.object(sys,'argv',['pipeline','--prepared',td,'--reuse-graph',str(source),'--output',str(out)]),patch.object(p,'load_bundle',return_value=({'a':{},'b':{}},{},{})),patch.object(p,'graph_stage') as graph,patch.object(p,'annotation_stage',return_value={}) as annotate,patch('pantrans.cds_package.write_package'):
+            with patch.object(sys,'argv',['pipeline','--prepared',td,'--reuse-graph',str(source),'--output',str(out)]),patch.object(p,'load_bundle',return_value=({'a':{},'b':{}},{},{})),patch.object(p,'per_variety_graph_stage') as graph,patch.object(p,'annotation_stage',return_value={}) as annotate,patch('pantrans.cds_package.write_package'),patch('pantrans.cds_outputs.export_last',return_value={}):
                 p.main()
             graph.assert_not_called()
             self.assertEqual(annotate.call_args.args[:2],('last',[['a','b']]))

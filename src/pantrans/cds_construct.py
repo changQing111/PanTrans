@@ -17,6 +17,7 @@ from pantrans.align_filter import minimap2_map
 from pantrans.construct_di_graph import assign_sccs, get_conn_comp
 from pantrans.transcript_redundancy import deduplicate_models
 from pantrans.prepared_bundle import prepared_file, manifest, load_prepared_bundle
+from pantrans.cds_target_graph import graph_stage as per_variety_graph_stage, require_longest_inputs
 
 
 def overlap(blocks, intervals):
@@ -159,10 +160,11 @@ def load_bundle(prepared, annotations, output, selected=None, graph_fasta_mode="
     return regions,models,gene_tids
 
 
-def filter_cds_graph(raw_bam,filtered_bam,regions,models,gene_tids,G):
+def filter_cds_graph(raw_bam,filtered_bam,regions,models,gene_tids,G,record_observer=None):
     stats=collections.Counter();target_cds={}
     with pysam.AlignmentFile(raw_bam) as bam,pysam.AlignmentFile(filtered_bam,'wb',header=bam.header) as filt:
         for read in bam:
+            if record_observer is not None:record_observer(read)
             stats['records']+=1
             if read.is_unmapped or read.is_supplementary:stats['unmapped_supplementary']+=1;continue
             if read.is_reverse:stats['reverse_rejected']+=1;continue
@@ -183,7 +185,8 @@ def filter_cds_graph(raw_bam,filtered_bam,regions,models,gene_tids,G):
 
 def cluster_cds_graph(output,regions,G,stats):
     with open(output/'graph.edges.tsv','w') as f:
-        for a,b in sorted(G.edges()):f.write(a+'\t'+b+'\n')
+        for a in sorted(G):
+            for b in sorted(G.successors(a)):f.write(a+'\t'+b+'\n')
     bed={g:[r['chrom'],int(r['gene_start0']),int(r['gene_end0'])] for g,r in regions.items()};lengths={g:int(r['body_end0'])-int(r['body_start0']) for g,r in regions.items()};varieties={g:r['variety'] for g,r in regions.items()}
     pre,last=assign_sccs(get_conn_comp(G),G,lengths,bed,list(dict.fromkeys(varieties.values())),'CS',main_chroms=['Chr'+str(i)+s for i in range(1,8) for s in 'ABD'],gene_variety_dic=varieties)
     for stage,clusters in [('pre',pre),('last',last)]:
@@ -194,6 +197,7 @@ def cluster_cds_graph(output,regions,G,stats):
 
 
 def graph_stage(output,regions,models,gene_tids,threads,timer=None):
+    """Historical all-valid-CDS graph helper retained for current append/tests."""
     timer=timer or StageTimer(output)
     with timer.stage('cds_mapping'):
         minimap2_map(str(output/'cds.fa'),str(output/'body.fa'),threads,str(output/'cds.raw.bam'))
@@ -315,6 +319,10 @@ def _annotation_stage(stage,clusters,prepared,models,gene_tids,output,workers,ca
 
 def reuse_graph(source, output, regions):
     checks={};clusters=[]
+    previous = json.loads((source/'reused_graph.json').read_text()) if (source/'reused_graph.json').is_file() else {}
+    def source_file(name):
+        path = source/name
+        return path if path.is_file() else Path(previous[name]['path']) if name in previous else path
     for stage in ('pre','last'):
         path=source/(stage+'.cluster')
         rows=[line.split() for line in path.read_text().splitlines() if line.strip()]
@@ -322,8 +330,18 @@ def reuse_graph(source, output, regions):
         if len(members)!=len(set(members)) or set(members)!=set(regions):
             raise ValueError('Reused '+stage+' clusters must partition the prepared genes exactly')
         clusters.append(rows)
-    for name in ('cds.raw.bam','cds.filtered.bam','graph.edges.tsv','pre.cluster','last.cluster','graph.summary.json'):
-        path=(source/name).resolve()
+    names = ['graph.edges.tsv','pre.cluster','last.cluster','graph.summary.json']
+    target_manifest = source_file('graph.mapping.json')
+    if target_manifest.is_file():
+        mapping = json.loads(target_manifest.read_text())
+        if mapping['status'] != 'completed':raise ValueError('Cannot reuse incomplete per-variety graph mapping')
+        names.append('graph.mapping.json')
+        for target in mapping['targets']:
+            names.extend(target[key] for key in ('raw_bam', 'filtered_bam', 'edges') if key in target)
+    else:
+        names.extend(['cds.raw.bam','cds.filtered.bam'])
+    for name in names:
+        path=source_file(name).resolve()
         if not path.is_file():raise ValueError('Missing graph input: '+str(path))
         st=path.stat();checks[name]=dict(path=str(path),size=st.st_size,mtime_ns=st.st_mtime_ns)
     for name in ('pre.cluster','last.cluster','graph.summary.json'):
@@ -333,7 +351,7 @@ def reuse_graph(source, output, regions):
 
 
 def configure_parser(p):
-    p.add_argument('--prepared',type=Path,required=True,help='preprocess output directory (schema 2 recommended)')
+    p.add_argument('--prepared',type=Path,required=True,help='schema-2 preprocess output with per-gene longest valid CDS (required for new graphs)')
     p.add_argument('--annotations',type=Path,help='GFF3 list required only for legacy schema-1 preprocessing')
     p.add_argument('-o','--output',type=Path,required=True)
     p.add_argument('--genes',type=Path)
@@ -354,6 +372,7 @@ def validate_args(args, parser):
 
 
 def run(args):
+    if not args.reuse_graph:require_longest_inputs(args.prepared)
     args.output.mkdir(exist_ok=False);started=time.monotonic();timer=StageTimer(args.output)
     selected=set(args.genes.read_text().split()) if args.genes else None
     annotations=args.annotations.read_text().splitlines() if args.annotations else []
@@ -363,25 +382,32 @@ def run(args):
     if args.reuse_graph:
         if (args.reuse_graph/'cds.graph.json').is_file():
             from pantrans.cds_package import load_package
-            reused_package,_=load_package(args.reuse_graph,args.prepared)
+            info=json.loads((args.reuse_graph/'cds.graph.json').read_text())
+            longest=info.get('mapping',{}).get('query')=='longest-valid-CDS-per-gene'
+            reused_package,_=load_package(args.reuse_graph,args.prepared,longest=longest)
             reused_policy=reused_package['policy']
         with timer.stage('reuse_graph'):pre,last=reuse_graph(args.reuse_graph,args.output,regions)
     else:
-        pre,last=graph_stage(args.output,regions,models,gt,args.threads,timer=timer)
+        pre,last=per_variety_graph_stage(args.prepared,args.output,regions,models,gt,args.threads,timer,subset=selected is not None)
     if not args.genes and not args.reuse_graph and manifest(str(args.prepared.resolve())).get('schema_version')==2:
         from pantrans.cds_package import write_package
-        with timer.stage('graph_package'):write_package(args.output,args.prepared,kind='construct')
+        with timer.stage('graph_package'):write_package(args.output,args.prepared,kind='construct',longest=True)
     summaries={}
     for stage,clusters in ([('pre',pre)] if args.annotate_pre else [])+[('last',last)]:
         with timer.stage(stage+'_annotation'):
             summaries[stage]=annotation_stage(stage,clusters,args.prepared,models,gt,args.output,args.workers,
                 cache_sources=None if args.no_evidence_cache else args.history_evidence_cache,local_fasta=args.local_fasta)
+    from pantrans.cds_outputs import export_last
+    with timer.stage('export_validation'):
+        validation=export_last(args.prepared,args.output,last)
     (args.output/'summary.json').write_text(json.dumps(dict(elapsed_seconds=time.monotonic()-started,
         stages=summaries,workflow="cds-homology-v2",experimental=False,
+        validation=validation,
         graph_thresholds=({k:POLICY[k] for k in ('pid','query_cds_coverage','target_cds_coverage')}
                           if not args.reuse_graph or reused_policy else None),
         graph_structure_checks=False if not args.reuse_graph or reused_policy else None,
         graph_origin='reused' if args.reuse_graph else 'fresh',
+        graph_mapping='see reused_graph.json' if args.reuse_graph else 'longest-valid-CDS-per-gene; per-variety targets; f20000 N2000',
         graph_policy_verified=not args.reuse_graph or reused_policy is not None,
         original_representative_models_seeded=True),indent=2))
     print(json.dumps(summaries),flush=True)

@@ -287,28 +287,12 @@ class TranslocationTests(unittest.TestCase):
         self.assertEqual((gene_path.read_bytes(), block_path.read_bytes()), before)
         self.assertFalse(list(self.root.glob(".pantrans-translocation-*")))
 
-    def test_cli_and_invalid_thresholds(self):
-        self.fixture()
+    def test_removed_cli_rejects_translocation(self):
         env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
-        command = [sys.executable, "-m", "pantrans", "translocation", "--pre-cluster", str(self.pre),
-                   "-b", str(self.bed), "--edges", str(self.edges), "--main-chroms", str(self.main),
-                   "-r", "CS", "-o", str(self.prefix)]
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.read_report(".translocation.blocks.tsv")[0]["status"], "supported_block")
-        self.bed.write_text(self.bed.read_text().replace("Chr3B\t0\t100\tq0", "contig\t0\t100\tq0"))
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any(row["status"] == "unplaced" for row in self.read_report(".translocation.genes.tsv")))
-        result = subprocess.run(command + ["--include-unplaced"], env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sum(row["status"] == "unplaced" for row in self.read_report(".translocation.genes.tsv")), 1)
-        for option, value in (("--min-anchor-genes", "1"), ("--max-gap", "-1"), ("--max-skipped-genes", "-1")):
-            result = subprocess.run(command + [option, value], env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 2, result.stderr)
-        self.pre.write_text("missing\n")
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
+        result = subprocess.run([sys.executable, '-m', 'pantrans', 'translocation'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('invalid choice', result.stderr)
 
     def test_input_cannot_be_overwritten_by_report(self):
         self.fixture()

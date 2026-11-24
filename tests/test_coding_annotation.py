@@ -177,18 +177,10 @@ class CodingAnnotationTests(unittest.TestCase):
         self.assertIn('ID=PanChr1000001.1;Parent=PanChr1000001', official)
         self.assertIn('ID=g.1;Parent=g', unrenamed)
 
-    def test_cli(self):
-        base = ["legacy-construct", "-c", "c", "-g", "g", "-b", "b", "-r", "r", "-p", "p", "-o", "o"]
-        self.assertFalse(read_parameters(base).annotate_cds)
-        self.assertFalse(read_parameters(base).transdecoder_parallel)
-        args = read_parameters(base + ["--annotate-cds", "--transdecoder-parallel", "-t", "4"])
-        self.assertTrue(args.transdecoder_parallel)
-        self.assertEqual(args.threads, 4)
-        self.assertEqual(read_parameters(base).min_orf_length, 50)
-        self.assertEqual(read_parameters(base + ["--min-orf-length", "75"]).min_orf_length, 75)
-        self.assertTrue(read_parameters(base + ["--transdecoder-dir", "/tools"]).annotate_cds)
-        with self.assertRaises(SystemExit):
-            read_parameters(base + ["--min-orf-length", "0"])
+    def test_removed_legacy_coding_cli_is_rejected(self):
+        for command in ('legacy-construct', 'legacy-append'):
+            with self.subTest(command=command), self.assertRaises(SystemExit):
+                read_parameters([command, '--annotate-cds', '--transdecoder-parallel'])
 
 
 if __name__ == "__main__":

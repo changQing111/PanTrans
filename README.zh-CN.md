@@ -11,7 +11,7 @@ conda create -n pantrans -c conda-forge -c bioconda \
   python=3.12 pip minimap2=2.30 samtools=1.22.1
 conda activate pantrans
 
-git clone --branch codex/cds-graph-utr-aware-dedup \
+git clone --branch codex/longest-cds-synteny \
   https://github.com/changQing111/PanTrans.git
 cd PanTrans
 python -m pip install .
@@ -22,7 +22,7 @@ samtools --version
 pantrans --help
 ```
 
-开发时可改用 `python -m pip install -e .`。只有旧流程启用 `--annotate-cds` 时才需要 TransDecoder。
+开发时可改用 `python -m pip install -e .`。当前 CDS 流程不需要 TransDecoder。
 
 ## `preprocess`：准备基因组和注释
 
@@ -50,6 +50,8 @@ pantrans preprocess \
 
 `--namespace-ids` 为 ID 添加品种名前缀。历史和新增批次采用相同的 ID 策略，并保留完整的预处理目录。
 
+预处理同时输出全部基因的无侧翼和带侧翼 DNA、完整 cDNA、全部及有效 CDS，以及每基因一条的 `Pan_cds.longest.valid.fa` 和逐基因选择表 `Pan_cds.longest.valid.tsv`。最长候选仅在有效 CDS 中选择，等长时按输出转录本 ID 字典升序；无有效 CDS 或无转录本的基因保留 DNA/坐标并记录状态。construct 和 append 均使用最长有效 CDS。文件及 manifest 说明见[预处理输出](docs/preprocess-cds-inputs.md)。
+
 ## `construct`：CDS 构图与注释
 
 ```bash
@@ -62,6 +64,12 @@ pantrans construct \
 默认注释 `last.cluster`，生成 `last.gff3` 和 `last.cdna.fa`；添加 `--annotate-pre` 可同时注释 `pre.cluster`。
 `--threads` 控制构图比对线程数，`--workers` 控制注释并发数。每次使用新的输出目录。
 当前命令优先选择 CS 作为参考，主染色体采用小麦 Chr1A–Chr7D。
+
+construct 读取新版 preprocess 的最长有效 CDS，依次比对到每个品种的全部无侧翼基因体，包含品种内比对。构图参数为 `-f 20000 -N 2000`，其余为 `-ax splice:hq -uf -I 2G -K 50M --secondary=yes`，并设置独立 split-prefix。`--threads` 是每个任务的共享线程预算，目标任务顺序运行，避免额外倍增线程/内存。构图仍以全部基因为节点，注释仍使用全部合格转录本。旧输入缺少最长 CDS 时，请在新目录重新运行 preprocess。
+
+`targets/0001/` 等目录保存各目标品种的 gene.fa、raw/filtered BAM、edges.tsv、饱和统计、命令和汇总，品种对应关系见 `graph.mapping.json`。最终新增 `last.gdna.fa`、`last.complete.cdna.fa`、完整转录本列表和 `validation.json`，逐条核对 DNA/exon 重建的 cDNA；无转录本模型的代表基因列入 `last.unannotated_representatives.tsv`，不补造模型。详见[新版构建流程](docs/construct-longest-cds.md)。
+
+append 已与 construct 统一为最长有效 CDS、分目标品种及 `-f 20000 -N 2000`。历史→历史图边直接复用；新增 CDS 分别查询每个历史目标，全部 CDS 分别查询每个新增目标。旧 N100 图包必须用新版 construct 重新构建，不能与新策略混用。详见[增量流程](docs/cds-append.md)。
 
 复用已有图，仅重新注释时，使用与原构图相同的预处理输入：
 
@@ -117,53 +125,25 @@ pantrans cnv \
   --output cnv.genes.txt
 ```
 
-## `translocation`：筛查候选染色体变化
+## `synteny`：两两品种共线性
 
-准备 `main_chroms.txt`，每行一个染色体名，与 BED 第 1 列一致。聚类、图边和完整 BED 必须来自同一数据集。
-
-```bash
-pantrans translocation \
-  --pre-cluster construct_results/pre.cluster \
-  --bed prepared/Pan_genes.bed \
-  --edges construct_results/graph.edges.tsv \
-  --main-chroms main_chroms.txt \
-  --reference CS \
-  --min-anchor-genes 3 --max-gap 1000000 --max-skipped-genes 5 \
-  --output-prefix screening
-```
-
-生成 `screening.translocation.genes.tsv` 和 `screening.translocation.blocks.tsv`。
-添加 `--allow-reverse` 可报告反向共线区块，`--include-unplaced` 可报告未定位基因对。
-
-## `legacy-construct`：旧版 cDNA 构建流程
+基于同一数据集的完整预处理输入、pre簇及双向同源图边，生成全部无序品种对的正向/反向共线区块。
 
 ```bash
-pantrans legacy-construct \
-  --cdna prepared/Pan_mrna.fa \
-  --gdna prepared/Pan_gene3000bp_gdna.fa \
-  --bed prepared/Pan_genes.bed \
-  --gene-regions prepared/Pan_gene_regions.tsv \
-  --exon-regions prepared/Pan_exon_regions.tsv \
-  --reference CS --prefix Pan \
-  --output legacy_results --threads 32
+pantrans synteny \
+  --prepared prepared --results construct_results \
+  --max-copy 3 --distance 20 --min-anchors 5 --lift-distance 10 \
+  --output synteny_results
 ```
 
-## `legacy-append`：追加旧版 cDNA 图
+append结果使用其`merged_prepared/`作为`--prepared`。默认运行全部步骤；大数据可用
+`--stage index/shard/pair/collect`分阶段调度，pair用`--pair-index`选择。只读现有图，不重新比对，
+不改变pre/last。输出区块、锚点、位置支持、完整二进制候选及汇总。见[共线性说明](docs/synteny.md)。
+原`translocation`命令已移除；旧分析脚本仍可读取已有易位报告。
 
-提供历史结果中未重命名的 GFF3/cDNA 配对及图包。另行准备 `combined_pre_and_new.bed`，包含历史 pre 聚类的代表基因和全部新增基因，gene ID 和品种标签须与序列输入一致。
+当前仅保留 `preprocess`、`construct`、`append`、`cnv` 和 `synteny` 五个子命令。
+`legacy-construct` 和 `legacy-append` 已移除。使用 `pantrans <子命令> --help` 查看参数。
 
-```bash
-pantrans legacy-append \
-  --cdna legacy_results/Pan_unrenamed_cdna.refer.fasta \
-  --history-gff3 legacy_results/Pan_unrenamed.gff3 \
-  --history-graph legacy_results/Pan.graph.json \
-  --query-cdna new_prepared/Pan_mrna.fa \
-  --gdna new_prepared/Pan_gene3000bp_gdna.fa \
-  --bed combined_pre_and_new.bed \
-  --gene-regions prepared/Pan_gene_regions.tsv new_prepared/Pan_gene_regions.tsv \
-  --exon-regions prepared/Pan_exon_regions.tsv new_prepared/Pan_exon_regions.tsv \
-  --prefix Append --output legacy_append_results --threads 32
-```
+## 致谢
 
-若需预测 CDS/UTR，另行安装 TransDecoder，并在任一旧版命令中添加 `--annotate-cds --transdecoder-dir /path/to/TransDecoder`。
-使用 `pantrans <子命令> --help` 查看该命令的全部参数。
+OpenAI Codex 为代码开发、测试和文档编写提供了 AI 辅助支持。项目作者负责审查相关贡献，并对发布代码及其科学应用承担责任。

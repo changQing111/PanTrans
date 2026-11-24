@@ -105,6 +105,8 @@ class IncrementalAppendSlurmTest(unittest.TestCase):
         self.assertIn("--identity-min 0.90", script)
         self.assertIn("--soft-clip-max 0.10", script)
         self.assertIn("history_construct_dir=", script)
+        self.assertIn("Retired: legacy-construct and legacy-append were removed", script)
+        self.assertLess(script.index('exit 1'), script.index('mkdir -p'))
         self.assertIn("-m pantrans.main legacy-construct", script)
         self.assertIn(
             "test_pantrans_cdna_align_gdna.filtered.bam", script

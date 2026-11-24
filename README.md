@@ -12,7 +12,7 @@ conda create -n pantrans -c conda-forge -c bioconda \
   python=3.12 pip minimap2=2.30 samtools=1.22.1
 conda activate pantrans
 
-git clone --branch codex/cds-graph-utr-aware-dedup \
+git clone --branch codex/longest-cds-synteny \
   https://github.com/changQing111/PanTrans.git
 cd PanTrans
 python -m pip install .
@@ -24,7 +24,7 @@ pantrans --help
 ```
 
 For an editable development installation, use `python -m pip install -e .`.
-TransDecoder is needed only for `--annotate-cds` in the legacy commands.
+The current CDS workflow does not require TransDecoder.
 
 ## `preprocess`: prepare genomes and annotations
 
@@ -55,6 +55,13 @@ pantrans preprocess \
 `--namespace-ids` prefixes IDs with variety names. Use the same ID policy for
 historical and new batches, and retain the complete prepared directories.
 
+Preprocessing writes unflanked and flanked DNA for all genes, full cDNA, all and
+valid CDS, plus `Pan_cds.longest.valid.fa` (one longest valid CDS per gene) and
+`Pan_cds.longest.valid.tsv` (one audit row per gene). Equal-length valid candidates
+are resolved by ascending output transcript ID. Genes without valid CDS or
+transcripts retain DNA and coordinates with an explicit selection status. The
+construct and append both query these longest valid CDS. See [output details](docs/preprocess-cds-inputs.md).
+
 ## `construct`: build and annotate a CDS graph
 
 ```bash
@@ -69,6 +76,22 @@ Add `--annotate-pre` to also annotate `pre.cluster`. `--threads` controls graph
 alignment; `--workers` controls annotation concurrency. Use a new output directory.
 The current command prefers CS as the reference and uses wheat Chr1A–Chr7D as
 main chromosomes.
+
+Construct now requires the longest-CDS outputs from preprocessing and queries
+each variety's complete unflanked gene bodies separately, including within-variety
+comparisons. Graph mapping uses `-f 20000 -N 2000` with the existing splice:hq,
+forward, split-index settings. Target tasks run sequentially within the shared
+`--threads` budget. Annotation still considers all eligible transcript isoforms.
+Per-target BAMs, edges, commands and saturation reports are in `targets/0001/`
+etc.; `graph.mapping.json` maps directories to varieties. Construct also exports
+`last.gdna.fa`, `last.complete.cdna.fa` and `validation.json`, checking every
+reconstructed cDNA. Representatives lacking transcript models are listed explicitly.
+See [the new construct workflow](docs/construct-longest-cds.md).
+
+Append uses the same longest-CDS, per-variety N2000 mapping profile. It reuses
+historical-to-historical edges, maps new queries to each historical target, and
+maps all queries to each new target. Old all-valid-CDS N100 histories require a
+fresh construct before append; their mapping profiles cannot be mixed.
 
 To rerun annotation using the existing graph and the same prepared inputs:
 
@@ -128,58 +151,31 @@ pantrans cnv \
   --output cnv.genes.txt
 ```
 
-## `translocation`: screen candidate chromosome changes
+## `synteny`: pairwise gene-order synteny
 
-Create `main_chroms.txt` with one chromosome name per line, matching BED column 1.
-Use clusters, edges and the complete BED from the same dataset.
-
-```bash
-pantrans translocation \
-  --pre-cluster construct_results/pre.cluster \
-  --bed prepared/Pan_genes.bed \
-  --edges construct_results/graph.edges.tsv \
-  --main-chroms main_chroms.txt \
-  --reference CS \
-  --min-anchor-genes 3 --max-gap 1000000 --max-skipped-genes 5 \
-  --output-prefix screening
-```
-
-Outputs are `screening.translocation.genes.tsv` and
-`screening.translocation.blocks.tsv`. Add `--allow-reverse` for blocks in reverse
-orientation, or `--include-unplaced` to report unplaced gene pairs.
-
-## `legacy-construct`: build with the cDNA workflow
+Use matching complete prepared inputs, pre clusters and directed graph edges.
+All unordered variety pairs are analyzed for forward and reverse blocks.
 
 ```bash
-pantrans legacy-construct \
-  --cdna prepared/Pan_mrna.fa \
-  --gdna prepared/Pan_gene3000bp_gdna.fa \
-  --bed prepared/Pan_genes.bed \
-  --gene-regions prepared/Pan_gene_regions.tsv \
-  --exon-regions prepared/Pan_exon_regions.tsv \
-  --reference CS --prefix Pan \
-  --output legacy_results --threads 32
+pantrans synteny \
+  --prepared prepared --results construct_results \
+  --max-copy 3 --distance 20 --min-anchors 5 --lift-distance 10 \
+  --output synteny_results
 ```
 
-## `legacy-append`: extend a legacy cDNA graph
+For append output, use its `merged_prepared/` directory. Large runs can use staged
+`--stage index/shard/pair/collect`; select pair tasks with `--pair-index`. The
+command reads the existing graph without realignment or changing pre/last
+clusters. Outputs include blocks, anchors, positional support, complete binary
+candidates and summaries. See [synteny details](docs/synteny.md).
+The `translocation` command has been removed; historical report readers remain.
 
-Use the historical unrenamed GFF3/cDNA pair and its graph package. Prepare
-`combined_pre_and_new.bed` with the historical pre-cluster representatives and all
-new genes; IDs and variety labels must match the sequence inputs.
+Use `pantrans <subcommand> --help` for command options. The cDNA legacy commands
+`legacy-construct` and `legacy-append` have been removed. Current commands are
+`preprocess`, `construct`, `append`, `cnv` and `synteny`.
 
-```bash
-pantrans legacy-append \
-  --cdna legacy_results/Pan_unrenamed_cdna.refer.fasta \
-  --history-gff3 legacy_results/Pan_unrenamed.gff3 \
-  --history-graph legacy_results/Pan.graph.json \
-  --query-cdna new_prepared/Pan_mrna.fa \
-  --gdna new_prepared/Pan_gene3000bp_gdna.fa \
-  --bed combined_pre_and_new.bed \
-  --gene-regions prepared/Pan_gene_regions.tsv new_prepared/Pan_gene_regions.tsv \
-  --exon-regions prepared/Pan_exon_regions.tsv new_prepared/Pan_exon_regions.tsv \
-  --prefix Append --output legacy_append_results --threads 32
-```
+## Acknowledgements
 
-For optional CDS/UTR prediction, install TransDecoder separately and add
-`--annotate-cds --transdecoder-dir /path/to/TransDecoder` to either legacy command.
-Use `pantrans <subcommand> --help` to list all options for a command.
+OpenAI Codex provided AI-assisted support for code development, testing and
+documentation. The project authors retain responsibility for reviewing the
+contributions, the released code and its scientific use.

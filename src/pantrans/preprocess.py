@@ -101,8 +101,8 @@ def _annotation(path):
     orphan = (set(exons) | set(coding)) - set(transcripts)
     if orphan:
         raise ValueError(f"Exons/CDS have unresolved transcript parents: {sorted(orphan)[:5]}")
-    if not transcripts:
-        raise ValueError(f"No gene/transcript/exon models found in GFF3: {path}")
+    if not genes:
+        raise ValueError(f"No gene models found in GFF3: {path}")
     for tid, pieces in coding.items():
         blocks = transcripts[tid][1]
         pieces = sorted(pieces, key=lambda p: p[1])
@@ -151,11 +151,13 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
     names = {"gdna": f"{prefix}_gene{flank}bp_gdna.fa", "cdna": f"{prefix}_mrna.fa",
              "gene": f"{prefix}_gene.fa", "cds": f"{prefix}_cds.fa",
              "cds_valid": f"{prefix}_cds.valid.fa", "cds_regions": f"{prefix}_cds_regions.tsv",
+             "cds_longest": f"{prefix}_cds.longest.valid.fa",
+             "cds_longest_selection": f"{prefix}_cds.longest.valid.tsv",
              "cds_status": f"{prefix}_cds_status.tsv", "models": f"{prefix}_transcript_models.jsonl",
              "bed": f"{prefix}_genes.bed", "genes": f"{prefix}_gene_regions.tsv",
              "exons": f"{prefix}_exon_regions.tsv", "ids": f"{prefix}_id_map.tsv",
              "manifest": f"{prefix}_preprocess.json"}
-    fasta_keys = ("gdna", "cdna", "gene", "cds", "cds_valid")
+    fasta_keys = ("gdna", "cdna", "gene", "cds", "cds_valid", "cds_longest")
     final_names = list(names.values()) + [names[k] + ".fai" for k in fasta_keys]
     lock = out / f".{prefix}.preprocess.lock"
     with lock.open("x"):
@@ -183,6 +185,9 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
                              "gdna_start0", "gdna_end0", "gene_start0", "gene_end0", "phase", "gdna_strand"])
                 sw = csv.writer(handles["cds_status"], delimiter="\t", lineterminator="\n")
                 sw.writerow(["variety", "gene", "transcript", "status", "cds_length"])
+                lw = csv.writer(handles["cds_longest_selection"], delimiter="\t", lineterminator="\n")
+                lw.writerow(["gene", "transcript", "CDS_length", "variety", "chrom", "strand",
+                             "gene_start0", "gene_end0", "valid_transcripts", "max_length_ties", "status"])
                 used_genes, used_transcripts = set(), set()
                 summaries = []
                 for index, (genome, annotation, variety) in enumerate(zip(genomes, annotations, varieties)):
@@ -203,12 +208,14 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
                                 contig_ids.add(words[0])
                     pysam.faidx("-o", str(fai), str(genome))
                     stats = dict(variety=variety, genes=0, transcripts=0, clipped_genes=0,
-                                 skipped_genes_without_transcripts=len(genes) - len(grouped))
+                                 genes_without_transcripts=len(genes) - len(grouped),
+                                 skipped_genes_without_transcripts=0, genes_with_valid_cds=0,
+                                 genes_without_valid_cds=0, genes_with_max_cds_length_ties=0)
                     with pysam.FastaFile(str(genome), filepath_index=str(fai)) as reference:
                         ref_lengths = dict(zip(reference.references, reference.lengths))
                         if len(ref_lengths) != len(reference.references):
                             raise ValueError(f"Duplicate FASTA sequence names: {genome}")
-                        for gene in sorted(grouped, key=lambda g: (genes[g][0], genes[g][1], g)):
+                        for gene in sorted(genes, key=lambda g: (genes[g][0], genes[g][1], g)):
                             chrom, start, end, strand = genes[gene]
                             if chrom not in ref_lengths or end > ref_lengths[chrom] or strand not in ("+", "-"):
                                 raise ValueError(f"Gene {gene}: missing contig, out-of-bounds interval or unknown strand")
@@ -233,7 +240,9 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
                             gw.writerow([gid, variety, chrom, start, end, strand, left, right,
                                          len(sequence), body_start, body_end, upstream, downstream])
                             iw.writerow([variety, "gene", gene, gid, gid])
-                            items = sorted(grouped[gene])
+                            items = sorted(grouped.get(gene, []))
+                            longest = None
+                            valid_count = max_length_ties = 0
                             # Preserve compatible IDs; reserve them before assigning other isoforms.
                             reserved = {tid.rsplit(".", 1)[1] for tid, _ in items
                                         if "." in tid and tid.rsplit(".", 1)[0] == gene
@@ -266,6 +275,15 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
                                     _fasta(handles["cds"], output_tid, cds_sequence, f"gene={gid} cds_status={status}")
                                 if status == "valid":
                                     _fasta(handles["cds_valid"], output_tid, cds_sequence, f"gene={gid}")
+                                    valid_count += 1
+                                    length = len(cds_sequence)
+                                    if longest is None or length > len(longest[1]):
+                                        longest = (output_tid, cds_sequence)
+                                        max_length_ties = 1
+                                    elif length == len(longest[1]):
+                                        max_length_ties += 1
+                                        if output_tid < longest[0]:
+                                            longest = (output_tid, cds_sequence)
                                 for ordinal, (a,b,phase) in enumerate(coding_blocks, 1):
                                     ga,gb = (right-b,right-a) if strand == "-" else (left+a,left+b)
                                     cw.writerow([gid,output_tid,ordinal,chrom,ga,gb,a,b,
@@ -276,6 +294,19 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
                                     ew.writerow([gid, output_tid, ordinal, chrom, genome_a, genome_b, a, b, "+"])
                                 iw.writerow([variety, "transcript", tid, output_tid, gid])
                                 stats["transcripts"] += 1
+                            if longest is not None:
+                                selected_tid, selected_cds = longest
+                                _fasta(handles["cds_longest"], selected_tid, selected_cds,
+                                       f"gene={gid} variety={variety} chrom={chrom} "
+                                       f"strand={strand} CDS_length={len(selected_cds)}")
+                                lw.writerow([gid, selected_tid, len(selected_cds), variety, chrom, strand,
+                                             start, end, valid_count, max_length_ties, "selected"])
+                                stats["genes_with_valid_cds"] += 1
+                                stats["genes_with_max_cds_length_ties"] += max_length_ties > 1
+                            else:
+                                lw.writerow([gid, "", 0, variety, chrom, strand, start, end, 0, 0,
+                                             "no_valid_CDS" if items else "no_transcripts"])
+                                stats["genes_without_valid_cds"] += 1
                             stats["genes"] += 1
                             stats["clipped_genes"] += upstream < flank or downstream < flank
                     for label, path in (("genome", genome), ("annotation", annotation)):
@@ -292,6 +323,12 @@ def preprocess(genomes, annotations, varieties, output, prefix="Pan", flank=3000
             manifest = dict(schema_version=2, flank=flank, namespace_ids=namespace_ids,
                             empty_fastas=empty_fastas, cds_validation="complete-ORF-phase-v1",
                             graph_query="cds_valid", graph_target="gene",
+                            longest_cds_selection=dict(query_file_key="cds_longest",
+                                table_file_key="cds_longest_selection", valid_only=True,
+                                order=["CDS_length_descending", "output_transcript_id_ascending"],
+                                genes_with_valid_cds=sum(s["genes_with_valid_cds"] for s in summaries),
+                                genes_without_valid_cds=sum(s["genes_without_valid_cds"] for s in summaries),
+                                genes_with_max_cds_length_ties=sum(s["genes_with_max_cds_length_ties"] for s in summaries)),
                             coordinate_system="TSV and BED: 0-based half-open; FASTA headers: 1-based inclusive",
                             gdna_orientation="gene strand; all emitted transcript exons are + relative to gdna",
                             files=names, varieties=summaries)

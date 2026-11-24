@@ -1,3 +1,5 @@
+> 当前CLI已移除legacy-construct和legacy-append。下方命令仅为历史流程记录，复现需使用对应旧版代码。
+
 > 历史 cDNA 流程参考。0.8版本的正式入口默认采用CDS流程，见[当前用法](README.zh-CN.md)。下方历史开发记录不代表当前CDS命令接口。
 
 # PanTrans

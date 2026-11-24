@@ -1,3 +1,7 @@
+> 当前CLI已移除legacy-construct和legacy-append。下方命令仅为历史流程记录，复现需使用对应旧版代码。
+
+> 命令更新：`translocation` 已移除，请使用 `pantrans synteny`；参见[当前共线性说明](docs/synteny.md)。下文易位部分仅描述历史行为。
+
 > Legacy cDNA pipeline design reference. For the default CDS construct/append workflow in 0.8, see [README](README.md) and [CLI migration](docs/cli-migration.md).
 
 # PanTrans 构建流程

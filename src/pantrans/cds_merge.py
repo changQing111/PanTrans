@@ -43,8 +43,8 @@ def check_inputs(history, query):
                 if model['transcript'] in transcripts or model['gene'] not in genes:
                     raise ValueError('Duplicate transcript or unknown model gene')
                 transcripts.add(model['transcript'])
-        if not genes or not transcripts:
-            raise ValueError('Empty prepared gene/model set')
+        if not genes:
+            raise ValueError('Empty prepared gene set')
         gene_sets.append(genes);transcript_sets.append(transcripts)
     if gene_sets[0] & gene_sets[1] or transcript_sets[0] & transcript_sets[1]:
         raise ValueError('Historical and query gene/transcript IDs overlap')
@@ -55,16 +55,31 @@ def merge_prepared(history, query, output, checked=None, hashes=None):
     manifests,gene_sets=checked if checked is not None else check_inputs(history,query)
     output=Path(output);output.mkdir(exist_ok=False)
     files={}
+    # Preserve the optional per-gene query artifacts when both inputs have them.
+    # Older schema-2 bundles remain valid, without advertising absent outputs.
+    with_longest = all(all(key in data['files'] for key in ('cds_longest', 'cds_longest_selection'))
+                       for data in manifests)
+    fasta_keys = FASTA_KEYS + (('cds_longest',) if with_longest else ())
+    table_keys = TABLE_KEYS + (('cds_longest_selection',) if with_longest else ())
     transcript_ids=set();valid_ids=set();coding_ids=set()
+    longest = {}
     for directory in (history,query):
         with prepared_file(directory,'models').open() as stream:
             for line in stream:
                 model=json.loads(line);transcript_ids.add(model['transcript'])
-                if model['valid']:valid_ids.add(model['transcript'])
+                if model['valid']:
+                    valid_ids.add(model['transcript'])
+                    if with_longest:
+                        candidate = (-model['cds_len'], model['transcript'])
+                        gene = model['gene']
+                        if gene not in longest or candidate < longest[gene]:
+                            longest[gene] = candidate
                 if model['cds_len']:coding_ids.add(model['transcript'])
     expected={'gene':gene_sets[0]|gene_sets[1], 'gdna':gene_sets[0]|gene_sets[1],
               'cdna':transcript_ids, 'cds_valid':valid_ids, 'cds':coding_ids}
-    for key in FASTA_KEYS:
+    if with_longest:
+        expected['cds_longest'] = {candidate[1] for candidate in longest.values()}
+    for key in fasta_keys:
         name='merged_'+key+'.fa';files[key]=name
         seen=set();hasher=hashlib.sha256()
         with (output/name).open('wb') as dst:
@@ -88,7 +103,7 @@ def merge_prepared(history, query, output, checked=None, hashes=None):
             raise ValueError('FASTA identifiers do not match prepared models: '+key)
         if (output/name).stat().st_size:
             pysam.faidx(str(output/name))
-    for key in TABLE_KEYS+('models',):
+    for key in table_keys+('models',):
         name='merged_'+key+('.jsonl' if key=='models' else '.tsv');files[key]=name
         hasher=hashlib.sha256()
         with (output/name).open('wb') as dst:
@@ -109,7 +124,13 @@ def merge_prepared(history, query, output, checked=None, hashes=None):
         if hashes is not None:hashes[key]=hasher.hexdigest()
     data=dict(manifests[0]);data['files']=files
     data['varieties']=manifests[0]['varieties']+manifests[1]['varieties']
-    data['empty_fastas']=[key for key in FASTA_KEYS if not (output/files[key]).stat().st_size]
+    data['empty_fastas']=[key for key in fasta_keys if not (output/files[key]).stat().st_size]
+    if with_longest:
+        data['longest_cds_selection'] = dict(manifests[0]['longest_cds_selection'])
+        for key in ('genes_with_valid_cds', 'genes_without_valid_cds', 'genes_with_max_cds_length_ties'):
+            data['longest_cds_selection'][key] = sum(v[key] for v in data['varieties'])
+    else:
+        data.pop('longest_cds_selection', None)
     data['files']['manifest']='merged_preprocess.json'
     (output/'merged_preprocess.json').write_text(json.dumps(data,indent=2)+'\n')
     return gene_sets

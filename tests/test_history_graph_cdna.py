@@ -5,13 +5,11 @@ from pantrans import pipeline
 from pantrans.main import read_parameters
 
 
-def test_cli_separates_annotation_and_graph_queries():
-    args = read_parameters(['legacy-append', '--cdna', 'final.fa', '--history-gff3', 'final.gff3',
-                            '--history-graph-cdna', 'original.fa', '--query-cdna', 'new.fa',
-                            '--gdna', 'new.gdna.fa', '--bed', 'all.bed',
-                            '--history-graph', 'old.json', '--output', 'out'])
-    assert args.cdna == 'final.fa'
-    assert args.history_graph_cdna == 'original.fa'
+def test_legacy_cli_is_removed():
+    import unittest
+    for name in ('legacy-construct', 'legacy-append'):
+        with unittest.TestCase().assertRaises(SystemExit):
+            read_parameters([name, '--history-graph-cdna', 'original.fa'])
 
 
 def test_graph_alignment_does_not_overwrite_annotation_bam():

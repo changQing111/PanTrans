@@ -28,8 +28,12 @@ def main():
         assert '0.8.0' in run('--version').stdout
         assert '--prepared' in run('construct','--help').stdout
         assert '--query-prepared' in run('append','--help').stdout
-        assert '--cdna' in run('legacy-construct','--help').stdout
-        assert '--history-gff3' in run('legacy-append','--help').stdout
+        assert '--pair-index' in run('synteny','--help').stdout
+        assert 'translocation' not in run('--help').stdout
+        run('translocation',ok=False)
+        for removed in ('legacy-construct','legacy-append'):
+            assert removed not in run('--help').stdout
+            run(removed,'--help',ok=False)
         run('construct','-c','old.fa','-o','bad',ok=False)
         rng=random.Random(772)
         codons=['AAA','AAC','ACC','AGC','ATC','CAA','CAC','CCA','CGC','CTC','GAA','GAC','GCA','GGC','GTC','TAC','TCC','TGC','TTC']
@@ -51,17 +55,22 @@ def main():
             '--query-prepared',root/'CS_prepared','-o',root/'appended','-t',2,'--workers',2)
         run('preprocess','--genomes',*genomes,'--annotations',*annotations,'--varieties','X','CS','-o',root/'all_prepared')
         run('construct','--prepared',root/'all_prepared','-o',root/'direct','-t',2,'--workers',2)
-        for name in ('graph.edges.tsv','pre.cluster','last.cluster','last.gff3','last.cdna.fa','last.model_sources.tsv','last.alignment_status.tsv','last.summary.json'):
+        mapping=json.loads((root/'direct/graph.mapping.json').read_text())
+        assert mapping['ordered_variety_pairs']==4 and len(mapping['targets'])==2
+        assert json.loads((root/'direct/validation.json').read_text())['all_cdna_reconstructed_and_verified']
+        run('synteny','--prepared',root/'all_prepared','--results',root/'direct','-o',root/'synteny')
+        synteny=json.loads((root/'synteny/summary.json').read_text())
+        assert synteny['comparisons']==1 and synteny['total_blocks']==0
+        for name in ('graph.edges.tsv','last.cluster','last.gff3','last.cdna.fa','last.complete.cdna.fa','last.gdna.fa'):
             assert (root/'appended'/name).read_bytes()==(root/'direct'/name).read_bytes(),name
-        with pysam.AlignmentFile(root/'appended/last.annotation.bam') as a,pysam.AlignmentFile(root/'direct/last.annotation.bam') as b:
-            assert [r.to_string() for r in a]==[r.to_string() for r in b]
         assert not (root/'direct/pre.gff3').exists()
         assert (root/'direct/last.evidence.sqlite').exists()
         policy=json.loads((root/'direct/cds.graph.json').read_text())['policy']
         assert policy['filter']=='cds-homology-v2' and policy['pid']==0.9 and not policy['structure_checks']
         summary={'wheel_installed':True,'package_path':str(package_path),'console':str(executable),
-                 'version':pantrans.__version__,'real_construct_append_equivalent':True,
-                 'last_only':True,'graph_policy':policy,'legacy_help_available':True}
+                 'version':pantrans.__version__,'new_construct_profile_verified':True,'new_append_profile_verified':True,
+                 'synteny_console_verified':True,'translocation_command_removed':True,
+                 'last_only':True,'graph_policy':policy,'legacy_commands_removed':True}
         print(json.dumps(summary,indent=2))
 
 if __name__=='__main__':main()

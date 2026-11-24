@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
+import io
 from unittest.mock import patch
 
 from pantrans.main import read_parameters,main
@@ -15,6 +17,18 @@ from test_cds_append import CDSAppendTests
 ROOT=Path(__file__).resolve().parents[1]
 
 class CDSParserTests(unittest.TestCase):
+    def test_exact_current_commands_and_removed_names(self):
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output),self.assertRaises(SystemExit) as exc:
+            read_parameters(['--help'])
+        self.assertEqual(exc.exception.code,0)
+        self.assertIn('{preprocess,construct,append,cnv,synteny}',output.getvalue())
+        for name in ('legacy-construct','legacy-append','translocation'):
+            self.assertNotIn(name,output.getvalue())
+            with self.subTest(name=name),self.assertRaises(SystemExit) as err:
+                read_parameters([name,'--help'])
+            self.assertEqual(err.exception.code,2)
+
     def test_construct_defaults(self):
         a=read_parameters(['construct','--prepared','prepared','-o','results'])
         self.assertEqual(a.prepared,Path('prepared'))
@@ -69,6 +83,7 @@ class CDSCLIIntegrationTests(unittest.TestCase):
         self.command('construct','--prepared',third/'merged_prepared','-o',direct,'-t',2,'--workers',2)
         self.compare(third,direct)
         self.assertGreater(json.loads((third/'last.cache_stats.json').read_text())['hits'],0)
+        self.assertTrue((history/'validation.json').is_file())
 
     def test_official_and_compatibility_wrapper_match(self):
         official=self.root/'official';wrapper=self.root/'wrapper'

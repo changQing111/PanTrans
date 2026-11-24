@@ -1,4 +1,28 @@
+# 当前CLI及历史迁移说明
+
+当前`pantrans`仅有五个子命令：`preprocess`、`construct`、`append`、`cnv`、`synteny`。
+`legacy-construct`、`legacy-append`和`translocation`已从参数注册和执行分支移除，
+调用这些名称（包括--help）将报未知子命令，不重定向到新算法。
+
+construct/append均采用最长有效CDS、按目标品种、f20000 N2000的CDS图策略。
+输入和运行示例见[README](../README.zh-CN.md)、[construct](construct-longest-cds.md)、
+[append](cds-append.md)。共线性分析见[synteny](synteny.md)。
+旧cDNA参数不适用于当前construct/append；旧N100或无完整可验证图包的数据需要重新构建。
+旧版内部Python实现和历史协议文档保留用于读取历史结果和回归验证，不构成当前命令入口。
+固定的历史源码快照不因本次修改而变化。
+
+旧版cDNA专用实验预设和SLURM验证脚本已标记退役，不能用于创建当前构建任务。
+下方为之前版本的迁移及验证记录，命令名仅作历史参考。
+
+---
+
 # Construct/append CLI migration in 0.8.0
+
+**2026-11-23:** construct has moved to longest-valid-CDS, per-variety N2000
+mapping. Append now shares this profile and accepts compatible N2000 graph packages.
+Older N100 histories must be rebuilt rather than imported under the new policy.
+The compatibility/equivalence checks below describe the earlier N100 workflow.
+See [current construct](construct-longest-cds.md).
 
 The official installed commands now use the CDS workflow:
 
@@ -10,13 +34,15 @@ The official installed commands now use the CDS workflow:
 | `pantrans append --history-graph ... --cdna ...` | `pantrans legacy-append --history-graph ... --cdna ...` |
 
 This is an explicit CLI contract change. Legacy arguments are not accepted or
-silently routed by the new default commands. Legacy function implementations
+silently routed by the new default commands. Historical function implementations
 remain in `pipeline.py`; the new implementations are `pantrans.cds_construct`
 and `pantrans.cds_append`. Experimental script paths are forwarding wrappers,
 not separate algorithm implementations. Running immutable historical source
 snapshots continues to use their original code.
 
-`preprocess`, `cnv` and `translocation` retain their interfaces. Legacy experiment
+`preprocess` and `cnv` retain their interfaces. The `translocation` command
+has been removed; `synteny` now provides all-pair gene-order block analysis
+from complete prepared inputs, pre clusters and graph edges (see synteny.md). Legacy experiment
 runners/validation scripts now call the explicit legacy subcommands. Full new
 constructs publish `cds.graph.json`; append checks schema, hashes and policy and
 can chain through its `merged_prepared/` directory.

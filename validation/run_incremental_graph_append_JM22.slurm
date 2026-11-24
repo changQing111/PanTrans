@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+# Historical cDNA experiment, retained only as a record of the old protocol.
+echo 'Retired: legacy-construct and legacy-append were removed. Use the current CDS construct/append workflow.' >&2
+exit 1
+
 worktree=/data/changq/PanTrans/.worktrees/append-construct-flow
 output_dir=${worktree}/validation/incremental_graph_append_JM22
 history_dir=${output_dir}/history_graph

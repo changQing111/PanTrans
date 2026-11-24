@@ -82,6 +82,11 @@ def persist(run, d):
 
 
 def prepare(a):
+    raise ValueError('Historical cDNA experiment presets are retired: legacy-construct and legacy-append were removed. Use current preprocess/construct/append with prepared CDS inputs.')
+
+
+def _prepare_historical_reference(a):
+    """Archived preset construction; not dispatched by the current runner."""
     root = a.runs.resolve(); root.mkdir(parents=True, exist_ok=True)
     run = root / (dt.datetime.now().strftime('%Y%m%dT%H%M%S') + '_' + a.preset + '_' + uuid.uuid4().hex[:8])
     base = a.base.resolve(); repo = a.repo.resolve()
