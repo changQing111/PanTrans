@@ -11,9 +11,15 @@ from pantrans.align_filter import (
     iter_filtered_bam_gene_edges,
 )
 from pantrans.graph_package import write_graph_package
+from pantrans.common_func import get_bed_varieties
 
 
-def _parse_names(value):
+def _parse_names(value, bed_path=None):
+    if value is None:
+        names = list(dict.fromkeys(get_bed_varieties(bed_path, required=True).values()))
+        if not names:
+            raise ValueError("No variety names were found in BED column 5")
+        return names
     if os.path.isfile(value):
         with open(value, "rt", encoding="utf-8") as handle:
             names = [line.strip() for line in handle if line.strip()]
@@ -46,7 +52,8 @@ def read_parameters(argv=None):
     parser.add_argument("--cdna", required=True, action="append")
     parser.add_argument("--gdna", required=True, action="append")
     parser.add_argument("--bed", required=True)
-    parser.add_argument("--name", required=True)
+    parser.add_argument("--name", required=False, default=None,
+                        help="legacy variety names; inferred from BED column 5 when omitted")
     parser.add_argument("--reference", required=True)
     parser.add_argument("--main-chroms")
     parser.add_argument("--coverage-min", required=True, type=float)
@@ -86,7 +93,7 @@ def main(argv=None):
         filtered_bam_path=args.filtered_bam,
         cdna_paths=args.cdna,
         gdna_paths=args.gdna,
-        variety_names=_parse_names(args.name),
+        variety_names=_parse_names(args.name, args.bed),
         reference_name=args.reference,
         main_chroms=_read_lines(args.main_chroms),
         provenance={"edge_generations": [provenance]},

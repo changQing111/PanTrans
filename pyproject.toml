@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pantrans"                  
-version = "0.3.0"
+version = "0.8.0"
 description = "A Scalable Approach for Constructing Pan-Genome and Pan-Transcriptome in Polyploid Organisms"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -16,8 +16,12 @@ authors = [
 dependencies = [
   "pysam",
   "networkx",
-  "biopython"
+  "biopython",
+  "numpy>=1.24"
 ]
 
 [project.scripts]
 pantrans = "pantrans.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

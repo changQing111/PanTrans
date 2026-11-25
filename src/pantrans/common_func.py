@@ -63,17 +63,74 @@ def get_fasta_len(fasta_path):
     return gene_len_dic
 
 def get_bed(bed_path):
-    """读取BED文件，返回基因坐标字典"""
+    """读取 BED 文件，返回基因坐标和链方向字典。
+
+    PanTrans uses column 5 for the variety name and column 6 for the strand
+    when present.
+    The variety column is intentionally ignored here so existing callers keep
+    their two-value return contract; use :func:`get_bed_varieties` to read it.
+    """
     bed_dic = {}
     gene_strand_dic = {}
-    with open(bed_path, "rt") as f:
-        for line in f:
-            li = line.strip().split("\t")
-            gene_strand_dic[li[3]] = li[5]
-            chrom, start, end, gene = li[0], int(li[1]), int(li[2]), li[3]
+    with open(bed_path, "rt", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            if not line.strip() or line.startswith("#"):
+                continue
+            li = line.rstrip("\n").split("\t")
+            if len(li) < 5:
+                raise ValueError(
+                    f"BED row {line_number} in {bed_path} must contain at least 5 columns"
+                )
+            gene_strand_dic[li[3]] = li[5] if len(li) >= 6 else "."
+            try:
+                chrom, start, end, gene = li[0], int(li[1]), int(li[2]), li[3]
+            except ValueError as exc:
+                raise ValueError(
+                    f"BED row {line_number} in {bed_path} has invalid coordinates"
+                ) from exc
             # bed_dic 始终保存基因组坐标，链方向由 gene_strand_dic 单独维护。
             bed_dic[gene] = [chrom, min(start, end), max(start, end)]
     return bed_dic, gene_strand_dic
+
+def get_bed_varieties(bed_path, required=False):
+    """Return ``gene_id -> variety`` from BED column 5.
+
+    A legacy BED commonly used ``0`` as the score in column 5. Such values
+    are treated as missing; construct and append require usable labels.
+    """
+    variety_dic = {}
+    with open(bed_path, "rt", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            if not raw_line.strip() or raw_line.startswith("#"):
+                continue
+            fields = raw_line.rstrip("\n").split("\t")
+            if len(fields) < 4:
+                raise ValueError(f"BED row {line_number} in {bed_path} has fewer than 4 columns")
+            gene_id = fields[3]
+            variety = fields[4].strip() if len(fields) >= 5 else ""
+            if variety in {"", ".", "0"}:
+                variety = None
+            previous = variety_dic.get(gene_id)
+            if previous is not None and previous != variety:
+                raise ValueError(f"Conflicting BED variety values for gene {gene_id}")
+            if variety is not None:
+                variety_dic[gene_id] = variety
+    if required:
+        missing = []
+        with open(bed_path, "rt", encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                if not raw_line.strip() or raw_line.startswith("#"):
+                    continue
+                fields = raw_line.rstrip("\n").split("\t")
+                if len(fields) < 5 or fields[4].strip() in {"", ".", "0"}:
+                    missing.append(line_number)
+        if missing:
+            preview = ", ".join(str(number) for number in missing[:10])
+            suffix = "..." if len(missing) > 10 else ""
+            raise ValueError(
+                f"BED {bed_path} is missing variety names in column 5 at rows {preview}{suffix}"
+            )
+    return variety_dic
 
 def get_bed_rows(bed_path):
     """读取 BED 文件并保留原始顺序。"""
@@ -81,9 +138,9 @@ def get_bed_rows(bed_path):
     with open(bed_path, "rt") as handle:
         for line in handle:
             li = line.strip().split("\t")
-            if len(li) < 6:
+            if len(li) < 5:
                 continue
-            rows.append((li[0], int(li[1]), int(li[2]), li[3], li[5]))
+            rows.append((li[0], int(li[1]), int(li[2]), li[3], li[5] if len(li) >= 6 else "."))
     return rows
 
 def cluster2dic(cluster_li):

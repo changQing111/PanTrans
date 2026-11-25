@@ -1,3 +1,6 @@
+import re
+from .graph_assignment import assign_main_by_graph
+
 MAIN_CHROMS = tuple(
     [f"A{i}" for i in range(1, 8)] +
     [f"B{i}" for i in range(1, 8)] +
@@ -6,7 +9,15 @@ MAIN_CHROMS = tuple(
 
 def build_main_chrom_order(main_chroms=None):
     chroms = tuple(main_chroms) if main_chroms else MAIN_CHROMS
-    return {chrom: index for index, chrom in enumerate(chroms)}
+    order = {}
+    for index, chrom in enumerate(chroms):
+        order[chrom] = index
+        match = re.match(r"^(?:Chr)?([1-7])([ABD])$", chrom)
+        if match:
+            number, subgenome = match.groups()
+            for alias in (f"{subgenome}{number}", f"{number}{subgenome}", f"Chr{number}{subgenome}"):
+                order.setdefault(alias, index)
+    return order
 
 def is_main_chrom(chrom, main_chrom_order):
     return chrom in main_chrom_order
@@ -47,8 +58,15 @@ def sort_gene(gene_li, bed_dic, main_chrom_order):
         )
         return sorted_li
 
-def get_variety_n(query, var_li, refer_prefixes=None):
+def get_variety_n(query, var_li, refer_prefixes=None, gene_variety_dic=None):
     """严格匹配品种名（前缀匹配），可将参考集前缀折叠为 Refer。"""
+    if gene_variety_dic is not None:
+        if query not in gene_variety_dic:
+            return get_variety_n(query, var_li, refer_prefixes=refer_prefixes)
+        mapped = gene_variety_dic[query]
+        if refer_prefixes and mapped in refer_prefixes:
+            return "Refer"
+        return mapped if mapped in var_li else None
     refer_prefixes = tuple(refer_prefixes or [])
     if refer_prefixes and query.startswith(refer_prefixes):
         return "Refer"
@@ -103,8 +121,8 @@ def assign_variety_genes(groups, genes, bed_dic, main_chrom_order):
             groups[chosen_index]["main_chrom"] = bed_dic[gene][0]
         available_indexes.remove(chosen_index)
 
-def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refer_prefixes=None):
-    """按“品种覆盖优先、主染色体优先、contig 灵活补位”策略输出簇列表.
+def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refer_prefixes=None, gene_variety_dic=None, graph=None, graph_assignment=True):
+    """Assign main-chromosome genes first, then attach reciprocal Ctg homologs.
     
     参数:
         variety_li: List[str], 品种名称列表
@@ -115,42 +133,84 @@ def assign_gene_by_chrom(variety_li, cluster_li, bed_dic, main_chroms=None, refe
         List[List[str]]: 每个子列表是一组同簇基因。
     """
     main_chrom_order = build_main_chrom_order(main_chroms)
-    normalized_variety_li = ["Refer"] + [v for v in variety_li if v != "Refer"] if refer_prefixes else variety_li[:]
+    # Input order reflects BED concatenation / append history, not a biological
+    # priority. Use the same tie and traversal order for the same variety set.
+    ordered_varieties = sorted(set(variety_li), key=lambda v: (v.casefold(), v))
+    normalized_variety_li = (["Refer"] + [v for v in ordered_varieties if v != "Refer"]
+                             if refer_prefixes else ordered_varieties)
     variety_gene_dic = {v: [] for v in normalized_variety_li}
     unknown_genes = []
     for gene in cluster_li:
-        variety = get_variety_n(gene, normalized_variety_li, refer_prefixes=refer_prefixes)
+        variety = get_variety_n(
+            gene,
+            normalized_variety_li,
+            refer_prefixes=refer_prefixes,
+            gene_variety_dic=gene_variety_dic,
+        )
         if variety is None:
             unknown_genes.append(gene)
             continue
         variety_gene_dic[variety].append(gene)
 
+    contig_genes_by_variety = {variety: [] for variety in normalized_variety_li}
     for variety, genes in variety_gene_dic.items():
         if genes:
-            variety_gene_dic[variety] = sort_gene(genes, bed_dic, main_chrom_order)
+            main_genes = [gene for gene in genes if is_main_chrom(bed_dic[gene][0], main_chrom_order)]
+            contig_genes_by_variety[variety] = sort_gene(
+                [gene for gene in genes if not is_main_chrom(bed_dic[gene][0], main_chrom_order)],
+                bed_dic,
+                main_chrom_order,
+            ) if any(not is_main_chrom(bed_dic[gene][0], main_chrom_order) for gene in genes) else []
+            variety_gene_dic[variety] = sort_gene(main_genes, bed_dic, main_chrom_order) if main_genes else []
 
     max_group_num = max((len(genes) for genes in variety_gene_dic.values()), default=0)
-    if max_group_num <= 1 and not unknown_genes:
-        return [cluster_li]
+    contig_genes = [gene for variety in normalized_variety_li for gene in contig_genes_by_variety[variety]]
+    if max_group_num <= 1 and not contig_genes and not unknown_genes:
+        kept = {gene for genes in variety_gene_dic.values() for gene in genes}
+        return [[gene for gene in cluster_li if gene in kept]]
 
-    if max_group_num == 0:
-        return [[gene] for gene in unknown_genes]
-
-    seed_variety = select_seed_variety(normalized_variety_li, variety_gene_dic, bed_dic, main_chrom_order)
     groups = [{"genes": [], "main_chrom": None} for _ in range(max_group_num)]
 
-    for index, gene in enumerate(variety_gene_dic[seed_variety]):
-        groups[index]["genes"].append(gene)
-        chrom = bed_dic[gene][0]
-        if is_main_chrom(chrom, main_chrom_order):
-            groups[index]["main_chrom"] = chrom
+    seed_variety = None
+    if max_group_num:
+        seed_variety = select_seed_variety(normalized_variety_li, variety_gene_dic, bed_dic, main_chrom_order)
+        for index, gene in enumerate(variety_gene_dic[seed_variety]):
+            groups[index]["genes"].append(gene)
+            groups[index]["main_chrom"] = bed_dic[gene][0]
 
-    for variety in normalized_variety_li:
-        if variety == seed_variety or not variety_gene_dic[variety]:
-            continue
-        assign_variety_genes(groups, variety_gene_dic[variety], bed_dic, main_chrom_order)
+    if graph_assignment and graph is not None and groups:
+        assign_main_by_graph(groups, variety_gene_dic, seed_variety,
+                             normalized_variety_li, bed_dic, graph)
+    else:
+        for variety in normalized_variety_li:
+            if variety == seed_variety or not variety_gene_dic[variety] or not groups:
+                continue
+            assign_variety_genes(groups, variety_gene_dic[variety], bed_dic, main_chrom_order)
+
+    for gene in contig_genes:
+        variety = get_variety_n(gene, normalized_variety_li, refer_prefixes=refer_prefixes, gene_variety_dic=gene_variety_dic)
+        matching_groups = []
+        if graph is not None:
+            for index, group in enumerate(groups):
+                linked_members = [
+                    member for member in group["genes"]
+                    if graph.has_edge(gene, member) and graph.has_edge(member, gene)
+                ]
+                if linked_members:
+                    for member in linked_members:
+                        same_variety = get_variety_n(
+                            member, normalized_variety_li, refer_prefixes=refer_prefixes,
+                            gene_variety_dic=gene_variety_dic) == variety
+                        matching_groups.append((not same_variety, len(group["genes"]), index))
+        if matching_groups:
+            chosen_index = min(matching_groups)[2]
+            groups[chosen_index]["genes"].append(gene)
+        else:
+            groups.append({"genes": [gene], "main_chrom": None})
 
     for gene in sort_gene(unknown_genes, bed_dic, main_chrom_order) if unknown_genes else []:
+        if not groups:
+            groups.append({"genes": [], "main_chrom": None})
         chosen_index = min(range(len(groups)), key=lambda i: (len(groups[i]["genes"]), i))
         groups[chosen_index]["genes"].append(gene)
 

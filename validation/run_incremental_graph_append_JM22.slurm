@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+# Historical cDNA experiment, retained only as a record of the old protocol.
+echo 'Retired: legacy-construct and legacy-append were removed. Use the current CDS construct/append workflow.' >&2
+exit 1
+
 worktree=/data/changq/PanTrans/.worktrees/append-construct-flow
 output_dir=${worktree}/validation/incremental_graph_append_JM22
 history_dir=${output_dir}/history_graph
@@ -27,11 +31,11 @@ export LC_ALL=C
 
 history_prefix=five_varieties
 history_manifest=${history_dir}/five_varieties.graph.json
-history_gtf=${history_construct_dir}/${history_prefix}_unrenamed.gtf
+history_gff3=${history_construct_dir}/${history_prefix}_unrenamed.gff3
 history_cdna=${history_construct_dir}/${history_prefix}_unrenamed_cdna.refer.fasta
 
-if [[ ! -s "${history_gtf}" || ! -s "${history_cdna}" ]]; then
-    "${python_bin}" -m pantrans.main construct \
+if [[ ! -s "${history_gff3}" || ! -s "${history_cdna}" ]]; then
+    "${python_bin}" -m pantrans.main legacy-construct \
         --name /data/changq/PanTrans/test/tmp_variety.txt \
         --cdna /data/changq/PanTrans/test/tmp_cdna.fasta \
         --gdna /data/changq/PanTrans/test/tmp_gdna.fasta \
@@ -61,10 +65,10 @@ if [[ ! -s "${history_manifest}" ]]; then
 fi
 
 /usr/bin/time -v -o "${output_dir}/append.time.txt" \
-    "${python_bin}" -m pantrans.main append \
+    "${python_bin}" -m pantrans.main legacy-append \
         --name JM22 \
         --cdna "${history_cdna}" \
-        --history-gtf "${history_gtf}" \
+        --history-gff3 "${history_gff3}" \
         --query-cdna /data/changq/PanTrans/test/JM22_cdna.fasta \
         --gdna /data/changq/PanTrans/test/JM22.gdna.fasta \
         --bed /data/changq/PanTrans/test/test_pantrans_pre.refer_append_JM22.bed \
